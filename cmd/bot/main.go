@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/mats/telegram-quiz-bot/internal/api"
 	"github.com/mats/telegram-quiz-bot/internal/bot"
 	"github.com/mats/telegram-quiz-bot/internal/llm"
 	"github.com/mats/telegram-quiz-bot/internal/quiz"
@@ -59,7 +62,19 @@ func main() {
 	}
 	defer scheduler.Stop()
 
-	// 5. Initialize and Start Bot
+	// 5. Initialize and Start API Server
+	httpPort := os.Getenv("HTTP_PORT")
+	if httpPort == "" {
+		httpPort = "8080"
+	}
+	apiServer := api.NewServer(httpPort, repos)
+	go func() {
+		if err := apiServer.Start(); err != nil {
+			log.Fatalf("API Server failed: %v", err)
+		}
+	}()
+
+	// 6. Initialize and Start Bot
 	quizBot, err := bot.New(botToken, repos, llmClient, scheduler, planManager)
 	if err != nil {
 		log.Fatalf("Failed to initialize bot: %v", err)
@@ -68,9 +83,16 @@ func main() {
 	go quizBot.Start()
 	defer quizBot.Stop()
 
-	// 6. Wait for interrupt signal to gracefully shutdown the server
+	// 7. Wait for interrupt signal to gracefully shutdown the server
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
-	log.Println("Shutting down bot...")
+	log.Println("Shutting down servers...")
+
+	// Gracefully shutdown API server
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := apiServer.Stop(ctx); err != nil {
+		log.Printf("API Server shutdown error: %v", err)
+	}
 }
