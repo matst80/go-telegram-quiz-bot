@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/mats/telegram-quiz-bot/internal/repository"
@@ -53,6 +55,32 @@ func (s *Server) Stop(ctx context.Context) error {
 }
 
 func (s *Server) registerRoutes(mux *http.ServeMux) {
+	// Serve static files from frontend/dist
+	frontendDist := "frontend/dist"
+
+	// Create a file server for the static files
+	fs := http.FileServer(http.Dir(frontendDist))
+
+	// Handle all routes not starting with /api/
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Clean the path to prevent directory traversal
+		path := filepath.Clean(r.URL.Path)
+
+		// Full path to the requested file
+		fullPath := filepath.Join(frontendDist, path)
+
+		// Check if the file exists and is not a directory
+		info, err := os.Stat(fullPath)
+		if os.IsNotExist(err) || info.IsDir() {
+			// Serve index.html for SPA routing fallback
+			http.ServeFile(w, r, filepath.Join(frontendDist, "index.html"))
+			return
+		}
+
+		// Serve the actual file (JS, CSS, images, etc)
+		fs.ServeHTTP(w, r)
+	})
+
 	// Plan
 	mux.HandleFunc("GET /api/plan", s.handleGetPlan)
 
