@@ -1,21 +1,22 @@
 package bot
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/mats/telegram-quiz-bot/internal/db"
 	"github.com/mats/telegram-quiz-bot/internal/quiz"
+	"github.com/mats/telegram-quiz-bot/internal/domain"
 	"gopkg.in/telebot.v3"
 )
 
 func (b *Bot) handleStart(c telebot.Context) error {
+	ctx := context.Background()
 	defer func() {
-		// Attempt to register user in DB when they start the bot
-		if err := b.db.RegisterUser(c.Sender().ID, c.Sender().Username); err != nil {
+		if err := b.repos.Users.RegisterUser(ctx, c.Sender().ID, c.Sender().Username); err != nil {
 			log.Printf("Failed to register user %d: %v", c.Sender().ID, err)
 		}
 	}()
@@ -28,7 +29,8 @@ func (b *Bot) handleStart(c telebot.Context) error {
 }
 
 func (b *Bot) handleLeaderboard(c telebot.Context) error {
-	users, err := b.db.GetTopUsers(10)
+	ctx := context.Background()
+	users, err := b.repos.Users.GetTopUsers(ctx, 10)
 	if err != nil {
 		return c.Send("Failed to fetch leaderboard.")
 	}
@@ -50,24 +52,34 @@ func (b *Bot) handleLeaderboard(c telebot.Context) error {
 }
 
 func (b *Bot) handlePlan(c telebot.Context) error {
-	topic := b.plan.GetCurrentTopic()
-	count := b.plan.GetCurrentQuizzesGenerated()
-	idx := b.plan.GetCurrentStepIndex()
+	ctx := context.Background()
+	currentQuiz, err := b.plan.GetCurrentQuiz(ctx)
+	if err != nil {
+		return c.Send("Error fetching learning plan.")
+	}
+
+	count := b.plan.GetCurrentQuestionsGenerated(ctx)
 
 	msg := fmt.Sprintf("📚 **Current Learning Plan** 📚\n\n"+
-		"**Step:** %d\n"+
 		"**Topic:** %s\n"+
-		"**Progress:** %d/%d quizzes generated for this topic.\n\n"+
+		"**Description:** %s\n"+
+		"**Progress:** %d/%d questions generated for this topic.\n\n"+
 		"Use /nextstep to skip to the next topic.",
-		idx+1, topic, count, quiz.QuizzesPerStep)
+		currentQuiz.Title, currentQuiz.Description, count, quiz.QuizzesPerStep)
 
 	return c.Send(msg, telebot.ModeMarkdown)
 }
 
 func (b *Bot) handleNextStep(c telebot.Context) error {
-	b.plan.AdvancePlan()
+	ctx := context.Background()
+	b.plan.AdvancePlan(ctx)
 
-	topic := b.plan.GetCurrentTopic()
+	currentQuiz, _ := b.plan.GetCurrentQuiz(ctx)
+	topic := "Unknown"
+	if currentQuiz != nil {
+		topic = currentQuiz.Title
+	}
+
 	msg := fmt.Sprintf("⏩ **Advanced to Next Step** ⏩\n\n"+
 		"The new topic is: **%s**\n\n"+
 		"The next quiz generated will be about this topic.", topic)
@@ -76,44 +88,46 @@ func (b *Bot) handleNextStep(c telebot.Context) error {
 }
 
 func (b *Bot) handleQuiz(c telebot.Context) error {
+	ctx := context.Background()
 	userID := c.Sender().ID
-	topic := b.plan.GetCurrentTopic()
+
+	currentQuiz, err := b.plan.GetCurrentQuiz(ctx)
+	if err != nil {
+		return c.Send("Error finding current topic.")
+	}
+
+	topic := currentQuiz.Title
 	log.Printf("[Bot] User %d requested quiz for topic: %s", userID, topic)
 
-	// NEW: Ensure lesson is shown before the first quiz of a topic
-	if err := b.ensureLessonShown(c, userID, topic); err != nil {
+	// ensure lesson could be reimplemented later, omitting for simplicity of refactoring
+	if err := b.ensureLessonShown(c, userID, currentQuiz); err != nil {
 		log.Printf("[Bot] Failed to ensure lesson shown for user %d: %v", userID, err)
 	}
 
-	q, err := b.db.GetNextUnansweredQuiz(userID, topic)
+	q, err := b.repos.Questions.GetNextUnanswered(ctx, userID, currentQuiz.ID)
 	if err != nil {
-		log.Printf("[Bot] Error fetching unanswered quiz for user %d: %v", userID, err)
+		log.Printf("[Bot] Error fetching unanswered question for user %d: %v", userID, err)
 		return c.Send("Oops, something went wrong fetching the quiz.")
 	}
 
 	if q == nil {
-		log.Printf("[Bot] No unanswered quizzes for user %d in topic '%s'. Triggering seed.", userID, topic)
+		log.Printf("[Bot] No unanswered questions for user %d in topic '%s'. Triggering seed.", userID, topic)
 		b.scheduler.EnsurePoolSufficient(userID)
 		return c.Send("I'm preparing more questions for you on **"+topic+"**. Please try again in a few seconds!", telebot.ModeMarkdown)
 	}
 
-	log.Printf("[Bot] Serving quiz ID %d to user %d", q.ID, userID)
+	log.Printf("[Bot] Serving question ID %d to user %d", q.ID, userID)
 
-	// Make sure the user is registered
-	if err := b.db.RegisterUser(c.Sender().ID, c.Sender().Username); err != nil {
+	if err := b.repos.Users.RegisterUser(ctx, c.Sender().ID, c.Sender().Username); err != nil {
 		log.Printf("[Bot] Failed to register user %d: %v", userID, err)
 	}
 
-	// Ensure we have enough questions seeded for the future
 	b.scheduler.EnsurePoolSufficient(userID)
 
 	menu := &telebot.ReplyMarkup{}
 	var rows []telebot.Row
 
-	// Create buttons for each option.
 	for _, opt := range q.Options {
-		// btn := menu.Data(opt, "ans", fmt.Sprintf("%d|%s", q.ID, opt))
-		// We use a simpler data format to avoid telebot's limit and parsing issues
 		data := fmt.Sprintf("%d|%s", q.ID, opt)
 		btn := menu.Data(opt, "ans", data)
 		rows = append(rows, menu.Row(btn))
@@ -121,17 +135,16 @@ func (b *Bot) handleQuiz(c telebot.Context) error {
 
 	menu.Inline(rows...)
 
-	msg := fmt.Sprintf("📝 **Topic:** %s\n\n**%s**", q.Topic, q.Question)
+	msg := fmt.Sprintf("📝 **Topic:** %s\n\n**%s**", topic, q.Text)
 	return c.Send(msg, menu, telebot.ModeMarkdown)
 }
 
 func (b *Bot) handleCallback(c telebot.Context) error {
+	ctx := context.Background()
 	raw := c.Callback().Data
 	userID := c.Sender().ID
 	log.Printf("[Bot] Callback from user %d: %s", userID, raw)
 
-	// telebot often prepends the unique key (e.g., "ans") and sometimes a separator like \f.
-	// We skip all non-digit characters at the start to find the Quiz ID.
 	data := raw
 	for len(data) > 0 && (data[0] < '0' || data[0] > '9') {
 		data = data[1:]
@@ -144,61 +157,54 @@ func (b *Bot) handleCallback(c telebot.Context) error {
 		return c.Respond(&telebot.CallbackResponse{Text: "Invalid option format.", ShowAlert: true})
 	}
 
-	quizID, err := strconv.Atoi(parts[0])
+	questionID, err := strconv.Atoi(parts[0])
 	if err != nil {
-		log.Printf("[Bot] Failed to parse quiz ID from '%s' (raw: %s) for user %d: %v", parts[0], raw, userID, err)
+		log.Printf("[Bot] Failed to parse question ID from '%s' (raw: %s) for user %d: %v", parts[0], raw, userID, err)
 		return c.Respond(&telebot.CallbackResponse{Text: "Invalid quiz ID.", ShowAlert: true})
 	}
 	selectedOption := parts[1]
-	log.Printf("[Bot] User %d selected '%s' for quiz %d", userID, selectedOption, quizID)
+	log.Printf("[Bot] User %d selected '%s' for question %d", userID, selectedOption, questionID)
 
-	// Fetch the specific quiz to verify answer
-	var q db.Quiz
-	err = b.db.QueryRow("SELECT correct_answer FROM quizzes WHERE id = ?", quizID).Scan(&q.CorrectAnswer)
-	if err != nil {
-		log.Printf("[Bot] Quiz %d not found in DB for user %d: %v", quizID, userID, err)
+	q, err := b.repos.Questions.GetByID(ctx, questionID)
+	if err != nil || q == nil {
+		log.Printf("[Bot] Question %d not found in DB for user %d: %v", questionID, userID, err)
 		return c.Respond(&telebot.CallbackResponse{Text: "Quiz not found or expired.", ShowAlert: true})
 	}
 
 	isCorrect := (selectedOption == q.CorrectAnswer)
 
-	// Record answer in db
-	err = b.db.RecordAnswer(quizID, c.Sender().ID, isCorrect)
+	err = b.repos.Questions.RecordAnswer(ctx, questionID, c.Sender().ID, isCorrect)
 	if err != nil {
-		// Likely already answered
 		return c.Respond(&telebot.CallbackResponse{Text: "You already answered this quiz!", ShowAlert: true})
 	}
 
-	// Notify user
 	msg := fmt.Sprintf("❌ Incorrect. The correct answer was: %s", q.CorrectAnswer)
 	if isCorrect {
 		msg = "✅ Correct! +1 Point!"
 	}
 
-	// Edit the message to remove the keyboard and show the result
 	newText := fmt.Sprintf("%s\n\n%s", c.Message().Text, msg)
 	c.Bot().Edit(c.Message(), newText)
 
-	// Ensure user is caught up in the db if they weren't somehow
-	b.db.RegisterUser(c.Sender().ID, c.Sender().Username)
-
-	// After answering, check if we need to seed more questions for this user
+	b.repos.Users.RegisterUser(ctx, c.Sender().ID, c.Sender().Username)
 	b.scheduler.EnsurePoolSufficient(c.Sender().ID)
 
-	// AUTOMATICALLY SEND NEXT QUESTION
 	go func() {
-		// Small delay for better UX
 		time.Sleep(1 * time.Second)
 
-		topic := b.plan.GetCurrentTopic()
-		// NEW: Ensure lesson is shown before the next quiz if topic changed
-		if err := b.ensureLessonShown(c, userID, topic); err != nil {
+		currentQuiz, _ := b.plan.GetCurrentQuiz(context.Background())
+		if currentQuiz == nil {
+			return
+		}
+		topic := currentQuiz.Title
+
+		if err := b.ensureLessonShown(c, userID, currentQuiz); err != nil {
 			log.Printf("[Bot] Failed to ensure lesson shown for user %d in callback: %v", userID, err)
 		}
 
-		qNext, err := b.db.GetNextUnansweredQuiz(userID, topic)
+		qNext, err := b.repos.Questions.GetNextUnanswered(context.Background(), userID, currentQuiz.ID)
 		if err == nil && qNext != nil {
-			log.Printf("[Bot] Auto-serving next quiz ID %d to user %d", qNext.ID, userID)
+			log.Printf("[Bot] Auto-serving next question ID %d to user %d", qNext.ID, userID)
 
 			menu := &telebot.ReplyMarkup{}
 			var rows []telebot.Row
@@ -209,7 +215,7 @@ func (b *Bot) handleCallback(c telebot.Context) error {
 			}
 			menu.Inline(rows...)
 
-			msg := fmt.Sprintf("📝 **Topic:** %s\n\n**%s**", qNext.Topic, qNext.Question)
+			msg := fmt.Sprintf("📝 **Topic:** %s\n\n**%s**", topic, qNext.Text)
 			b.teleBot.Send(c.Sender(), msg, menu, telebot.ModeMarkdown)
 		}
 	}()
@@ -218,22 +224,20 @@ func (b *Bot) handleCallback(c telebot.Context) error {
 }
 
 // ensureLessonShown checks if a user has seen the lesson for a topic and sends it if not.
-func (b *Bot) ensureLessonShown(c telebot.Context, userID int64, topic string) error {
-	seen, err := b.db.HasSeenLesson(userID, topic)
+func (b *Bot) ensureLessonShown(c telebot.Context, userID int64, currentQuiz *domain.Quiz) error {
+	ctx := context.Background()
+	key := fmt.Sprintf("lesson_seen_%d_%d", userID, currentQuiz.ID)
+	seenStr, err := b.repos.Settings.Get(ctx, key)
 	if err != nil {
 		return err
 	}
-	if seen {
+	if seenStr == "true" {
 		return nil
 	}
 
-	lesson, err := b.db.GetLesson(topic)
-	if err != nil {
-		return err
-	}
-
+	lesson := currentQuiz.Description
 	if lesson != "" {
-		msg := fmt.Sprintf("📖 **Lesson: %s** 📖\n\n%s", topic, lesson)
+		msg := fmt.Sprintf("📖 **Lesson: %s** 📖\n\n%s", currentQuiz.Title, lesson)
 		if _, err := c.Bot().Send(c.Sender(), msg, telebot.ModeMarkdown); err != nil {
 			return err
 		}
@@ -241,5 +245,5 @@ func (b *Bot) ensureLessonShown(c telebot.Context, userID int64, topic string) e
 		time.Sleep(2 * time.Second)
 	}
 
-	return b.db.MarkLessonSeen(userID, topic)
+	return b.repos.Settings.Set(ctx, key, "true")
 }

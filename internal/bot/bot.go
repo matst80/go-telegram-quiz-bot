@@ -1,25 +1,27 @@
 package bot
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"time"
 
-	"github.com/mats/telegram-quiz-bot/internal/db"
+	"github.com/mats/telegram-quiz-bot/internal/domain"
 	"github.com/mats/telegram-quiz-bot/internal/llm"
 	"github.com/mats/telegram-quiz-bot/internal/quiz"
+	"github.com/mats/telegram-quiz-bot/internal/repository"
 	"gopkg.in/telebot.v3"
 )
 
 type Bot struct {
 	teleBot   *telebot.Bot
-	db        *db.DB
+	repos     *repository.Repositories
 	llmClient *llm.Client
 	scheduler *quiz.Scheduler
 	plan      *quiz.PlanManager
 }
 
-func New(token string, database *db.DB, llmClient *llm.Client, scheduler *quiz.Scheduler, planManager *quiz.PlanManager) (*Bot, error) {
+func New(token string, repos *repository.Repositories, llmClient *llm.Client, scheduler *quiz.Scheduler, planManager *quiz.PlanManager) (*Bot, error) {
 	pref := telebot.Settings{
 		Token:  token,
 		Poller: &telebot.LongPoller{Timeout: 10 * time.Second},
@@ -32,7 +34,7 @@ func New(token string, database *db.DB, llmClient *llm.Client, scheduler *quiz.S
 
 	appBot := &Bot{
 		teleBot:   b,
-		db:        database,
+		repos:     repos,
 		llmClient: llmClient,
 		scheduler: scheduler,
 		plan:      planManager,
@@ -40,8 +42,7 @@ func New(token string, database *db.DB, llmClient *llm.Client, scheduler *quiz.S
 
 	appBot.registerHandlers()
 
-	// Set the scheduler callback for broadcasting
-	scheduler.SetOnBatch(appBot.BroadcastQuiz)
+	scheduler.SetOnBatch(appBot.BroadcastQuestion)
 
 	return appBot, nil
 }
@@ -53,7 +54,6 @@ func (b *Bot) registerHandlers() {
 	b.teleBot.Handle("/plan", b.handlePlan)
 	b.teleBot.Handle("/nextstep", b.handleNextStep)
 
-	// Handle all callback queries from inline buttons
 	b.teleBot.Handle(telebot.OnCallback, b.handleCallback)
 }
 
@@ -67,20 +67,18 @@ func (b *Bot) Stop() {
 	b.teleBot.Stop()
 }
 
-func (b *Bot) BroadcastQuiz(quizzes []db.Quiz) {
-	users, err := b.db.GetAllUsers()
+func (b *Bot) BroadcastQuestion(questions []domain.Question) {
+	ctx := context.Background()
+	users, err := b.repos.Users.GetAllUsers(ctx)
 	if err != nil {
 		log.Printf("[Bot] Failed to get users for broadcast: %v", err)
 		return
 	}
 
 	for _, user := range users {
-		log.Printf("[Bot] Broadcasting batch of %d quizzes to user %d", len(quizzes), user.TelegramID)
-		// We just send the first one, the sequence will be handled by handleCallback
-		// Actually, the user wants "present the user with a sequence of questions"
-		// If we send them all at once, it might be messy.
-		// If we send the first one, they can start the sequence.
-		q := quizzes[0]
+		log.Printf("[Bot] Broadcasting batch of %d questions to user %d", len(questions), user.TelegramID)
+
+		q := questions[0]
 		target := &telebot.User{ID: user.TelegramID}
 
 		menu := &telebot.ReplyMarkup{}
@@ -92,7 +90,13 @@ func (b *Bot) BroadcastQuiz(quizzes []db.Quiz) {
 		}
 		menu.Inline(rows...)
 
-		msg := fmt.Sprintf("🔔 **New Quizzes Available!** 🔔\n\n📝 **Topic:** %s\n\n**%s**", q.Topic, q.Question)
+		quizObj, _ := b.repos.Quizzes.GetByID(ctx, q.QuizID)
+		topic := "Unknown"
+		if quizObj != nil {
+			topic = quizObj.Title
+		}
+
+		msg := fmt.Sprintf("🔔 **New Quizzes Available!** 🔔\n\n📝 **Topic:** %s\n\n**%s**", topic, q.Text)
 		_, err := b.teleBot.Send(target, msg, menu, telebot.ModeMarkdown)
 		if err != nil {
 			log.Printf("[Bot] Failed to send broadcast to user %d: %v", user.TelegramID, err)
