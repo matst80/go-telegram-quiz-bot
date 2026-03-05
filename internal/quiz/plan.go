@@ -1,87 +1,77 @@
 package quiz
 
 import (
-	"bufio"
+	"context"
+	"fmt"
 	"log"
-	"os"
 	"strconv"
-	"strings"
 
-	"github.com/mats/telegram-quiz-bot/internal/db"
+	"github.com/mats/telegram-quiz-bot/internal/domain"
+	"github.com/mats/telegram-quiz-bot/internal/repository"
 )
 
-// QuizzesPerStep determines how many quizzes to generate for each topic
-// before automatically advancing to the next step.
+// QuizzesPerStep determines how many questions to generate for each topic (quiz)
+// before automatically advancing to the next step (quiz).
 const QuizzesPerStep = 5
 
 // PlanManager handles loading the learning plan and tracking progress.
 type PlanManager struct {
-	db     *db.DB
-	topics []string
+	repos *repository.Repositories
 }
 
-// NewPlanManager creates a manager and loads topics from the provided file.
-func NewPlanManager(db *db.DB, filePath string) *PlanManager {
-	pm := &PlanManager{
-		db: db,
+// NewPlanManager creates a manager that reads directly from the database segments/quizzes.
+func NewPlanManager(repos *repository.Repositories) *PlanManager {
+	return &PlanManager{
+		repos: repos,
 	}
-	pm.loadPlan(filePath)
-	return pm
 }
 
-func (pm *PlanManager) loadPlan(filePath string) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		log.Printf("Warning: Could not open learning plan at %s: %v. Using fallback plan.", filePath, err)
-		pm.topics = []string{"Basic Spanish Vocabulary"} // fallback
-		return
+// GetCurrentQuiz retrieves the currently active quiz from the database based on settings.
+// This replaces reading from LEARNINGPLAN.md.
+func (pm *PlanManager) GetCurrentQuiz(ctx context.Context) (*domain.Quiz, error) {
+	// 1. Get current step index from settings
+	valStr, err := pm.repos.Settings.Get(ctx, "current_learning_step")
+	idx := 0
+	if err == nil && valStr != "" {
+		idx, _ = strconv.Atoi(valStr)
 	}
-	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" && !strings.HasPrefix(line, "#") {
-			pm.topics = append(pm.topics, line)
+	// 2. Fetch all segments, ordered by index
+	segments, err := pm.repos.Segments.GetAll(ctx)
+	if err != nil || len(segments) == 0 {
+		return nil, fmt.Errorf("no segments found in database")
+	}
+
+	// 3. To find the Nth quiz overall, we iterate through segments
+	currentQuizIndex := 0
+	for _, seg := range segments {
+		quizzes, err := pm.repos.Quizzes.GetBySegmentID(ctx, seg.ID)
+		if err != nil {
+			continue
+		}
+
+		for _, q := range quizzes {
+			if currentQuizIndex == idx {
+				return &q, nil
+			}
+			currentQuizIndex++
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		log.Printf("Error reading learning plan: %v", err)
+	// If we've exhausted all quizzes, wrap around back to 0
+	if idx > 0 && currentQuizIndex > 0 {
+		log.Println("Wrapped around learning plan to the beginning.")
+		pm.repos.Settings.Set(ctx, "current_learning_step", "0")
+		pm.repos.Settings.Set(ctx, "current_step_quizzes_generated", "0")
+		return pm.GetCurrentQuiz(ctx)
 	}
 
-	if len(pm.topics) == 0 {
-		pm.topics = []string{"Basic Spanish Vocabulary"}
-	}
+	return nil, fmt.Errorf("no quizzes found in any segment")
 }
 
-// GetCurrentStepIndex returns the zero-based index of the current learning step.
-func (pm *PlanManager) GetCurrentStepIndex() int {
-	valStr, err := pm.db.GetSetting("current_learning_step")
-	if err != nil || valStr == "" {
-		return 0
-	}
-	idx, err := strconv.Atoi(valStr)
-	if err != nil {
-		return 0
-	}
-	return idx
-}
-
-// GetCurrentTopic returns the topic for the current step.
-func (pm *PlanManager) GetCurrentTopic() string {
-	idx := pm.GetCurrentStepIndex()
-	// Wrap around if we reach the end of the plan
-	if len(pm.topics) == 0 {
-		return "Basic Spanish Vocabulary"
-	}
-	safeIdx := idx % len(pm.topics)
-	return pm.topics[safeIdx]
-}
-
-// GetCurrentQuizzesGenerated returns how many quizzes have been generated for the current step.
-func (pm *PlanManager) GetCurrentQuizzesGenerated() int {
-	valStr, err := pm.db.GetSetting("current_step_quizzes_generated")
+// GetCurrentQuestionsGenerated returns how many questions have been generated for the current quiz.
+func (pm *PlanManager) GetCurrentQuestionsGenerated(ctx context.Context) int {
+	valStr, err := pm.repos.Settings.Get(ctx, "current_step_quizzes_generated")
 	if err != nil || valStr == "" {
 		return 0
 	}
@@ -92,39 +82,47 @@ func (pm *PlanManager) GetCurrentQuizzesGenerated() int {
 	return count
 }
 
-// RecordQuizGenerated increments the counter for the current step.
+// RecordQuestionGenerated increments the counter for the current step.
 // If it reaches the threshold, it advances to the next step and resets the counter.
-func (pm *PlanManager) RecordQuizGenerated() {
-	count := pm.GetCurrentQuizzesGenerated()
+func (pm *PlanManager) RecordQuestionGenerated(ctx context.Context) {
+	count := pm.GetCurrentQuestionsGenerated(ctx)
 	count++
 
 	if count >= QuizzesPerStep {
 		// Advance to next step
-		idx := pm.GetCurrentStepIndex()
+		valStr, _ := pm.repos.Settings.Get(ctx, "current_learning_step")
+		idx := 0
+		if valStr != "" {
+			idx, _ = strconv.Atoi(valStr)
+		}
 		idx++
-		if err := pm.db.SetSetting("current_learning_step", strconv.Itoa(idx)); err != nil {
+		if err := pm.repos.Settings.Set(ctx, "current_learning_step", strconv.Itoa(idx)); err != nil {
 			log.Printf("Failed to increment learning step: %v", err)
 		}
 
 		// Reset counter
-		if err := pm.db.SetSetting("current_step_quizzes_generated", "0"); err != nil {
+		if err := pm.repos.Settings.Set(ctx, "current_step_quizzes_generated", "0"); err != nil {
 			log.Printf("Failed to reset quiz counter: %v", err)
 		}
 
 		log.Printf("Learning plan advanced to step %d. Counter reset.", idx)
 	} else {
 		// Just update counter
-		if err := pm.db.SetSetting("current_step_quizzes_generated", strconv.Itoa(count)); err != nil {
+		if err := pm.repos.Settings.Set(ctx, "current_step_quizzes_generated", strconv.Itoa(count)); err != nil {
 			log.Printf("Failed to update quiz counter: %v", err)
 		}
-		log.Printf("Quiz generated for current step. Counter: %d/%d", count, QuizzesPerStep)
+		log.Printf("Question generated for current step. Counter: %d/%d", count, QuizzesPerStep)
 	}
 }
 
 // AdvancePlan manually moves the plan to the next step, resetting the counter.
-func (pm *PlanManager) AdvancePlan() {
-	idx := pm.GetCurrentStepIndex()
+func (pm *PlanManager) AdvancePlan(ctx context.Context) {
+	valStr, _ := pm.repos.Settings.Get(ctx, "current_learning_step")
+	idx := 0
+	if valStr != "" {
+		idx, _ = strconv.Atoi(valStr)
+	}
 	idx++
-	pm.db.SetSetting("current_learning_step", strconv.Itoa(idx))
-	pm.db.SetSetting("current_step_quizzes_generated", "0")
+	pm.repos.Settings.Set(ctx, "current_learning_step", strconv.Itoa(idx))
+	pm.repos.Settings.Set(ctx, "current_step_quizzes_generated", "0")
 }

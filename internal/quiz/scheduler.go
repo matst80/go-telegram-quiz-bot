@@ -1,47 +1,42 @@
 package quiz
 
 import (
+	"context"
 	"log"
 	"math/rand"
 	"time"
 
-	"github.com/mats/telegram-quiz-bot/internal/db"
+	"github.com/mats/telegram-quiz-bot/internal/domain"
 	"github.com/mats/telegram-quiz-bot/internal/llm"
+	"github.com/mats/telegram-quiz-bot/internal/repository"
 	"github.com/robfig/cron/v3"
 )
 
 type Scheduler struct {
 	cron    *cron.Cron
-	db      *db.DB
+	repos   *repository.Repositories
 	llm     *llm.Client
 	plan    *PlanManager
 	cronJob cron.EntryID
-	OnBatch func([]db.Quiz)
+	OnBatch func([]domain.Question)
 }
 
-type Broadcaster interface {
-	BroadcastQuiz(quizzes []db.Quiz)
-}
-
-func NewScheduler(database *db.DB, llmClient *llm.Client, planManager *PlanManager) *Scheduler {
-	// For demonstration, we'll run it every hour (or we can make it every minute for testing)
-	// We'll configure it to every hour natively, but we can trigger it manually on startup.
+func NewScheduler(repos *repository.Repositories, llmClient *llm.Client, planManager *PlanManager) *Scheduler {
 	return &Scheduler{
-		cron: cron.New(), // using standard 5-field cron spec (min, hour, dom, month, dow)
-		db:   database,
-		llm:  llmClient,
-		plan: planManager,
+		cron:  cron.New(),
+		repos: repos,
+		llm:   llmClient,
+		plan:  planManager,
 	}
 }
 
-func (s *Scheduler) SetOnBatch(fn func([]db.Quiz)) {
+func (s *Scheduler) SetOnBatch(fn func([]domain.Question)) {
 	s.OnBatch = fn
 }
 
-// Start begins the cron scheduler
 func (s *Scheduler) Start(spec string) error {
 	id, err := s.cron.AddFunc(spec, func() {
-		s.GenerateAndSaveQuiz()
+		s.GenerateAndSaveQuestion()
 	})
 	if err != nil {
 		return err
@@ -52,71 +47,79 @@ func (s *Scheduler) Start(spec string) error {
 	return nil
 }
 
-// Stop gracefully stops the scheduler
 func (s *Scheduler) Stop() {
 	s.cron.Stop()
 }
 
-// GenerateAndSaveQuiz is the core logic that the cron job runs
-func (s *Scheduler) GenerateAndSaveQuiz() {
+func (s *Scheduler) GenerateAndSaveQuestion() {
 	s.GenerateAndBroadcastBatch(5)
 }
 
-// GenerateAndBroadcastBatch generates a batch of quizzes and notifies subscribers
 func (s *Scheduler) GenerateAndBroadcastBatch(count int) {
-	topic := s.plan.GetCurrentTopic()
-	log.Printf("Generating %d new quizzes for topic '%s' via LLM...", count, topic)
-
-	// Fetch recent questions to avoid duplicates
-	exclude, _ := s.db.GetRecentQuestionsForTopic(topic, 10)
-
-	quizzes, err := s.llm.GenerateSpanishQuizzes(topic, exclude, count)
+	ctx := context.Background()
+	currentQuiz, err := s.plan.GetCurrentQuiz(ctx)
 	if err != nil {
-		log.Printf("Error generating quizzes: %v", err)
+		log.Printf("Scheduler: Failed to get current quiz from plan: %v", err)
 		return
 	}
 
-	var savedQuizzes []db.Quiz
-	for _, q := range quizzes {
+	topic := currentQuiz.Title
+	log.Printf("Generating %d new questions for quiz topic '%s' via LLM...", count, topic)
+
+	exclude, _ := s.repos.Questions.GetRecentForQuiz(ctx, currentQuiz.ID, 10)
+
+	questions, err := s.llm.GenerateSpanishQuestions(topic, exclude, count)
+	if err != nil {
+		log.Printf("Error generating questions: %v", err)
+		return
+	}
+
+	var savedQuestions []domain.Question
+	for _, q := range questions {
+		q.QuizID = currentQuiz.ID
+		q.IsActive = true
+
 		// Shuffling options
 		rand.Seed(time.Now().UnixNano())
 		rand.Shuffle(len(q.Options), func(i, j int) {
 			q.Options[i], q.Options[j] = q.Options[j], q.Options[i]
 		})
 
-		id, err := s.db.SaveQuiz(q)
+		err := s.repos.Questions.Create(ctx, &q)
 		if err != nil {
-			log.Printf("Error saving quiz: %v", err)
+			log.Printf("Error saving question: %v", err)
 			continue
 		}
-		q.ID = id
-		savedQuizzes = append(savedQuizzes, q)
-		s.plan.RecordQuizGenerated()
+		savedQuestions = append(savedQuestions, q)
+		s.plan.RecordQuestionGenerated(ctx)
 	}
 
-	if len(savedQuizzes) > 0 && s.OnBatch != nil {
-		log.Printf("Broadcasting %d new quizzes", len(savedQuizzes))
-		s.OnBatch(savedQuizzes)
+	if len(savedQuestions) > 0 && s.OnBatch != nil {
+		log.Printf("Broadcasting %d new questions", len(savedQuestions))
+		s.OnBatch(savedQuestions)
 	}
 }
 
-// EnsurePoolSufficient checks if a user has enough unanswered quizzes for the current topic.
-// If not, it triggers generation of more quizzes until a buffer of 2 is reached.
 func (s *Scheduler) EnsurePoolSufficient(telegramID int64) {
-	topic := s.plan.GetCurrentTopic()
-	count, err := s.db.GetUnansweredCount(telegramID, topic)
+	ctx := context.Background()
+	currentQuiz, err := s.plan.GetCurrentQuiz(ctx)
+	if err != nil {
+		log.Printf("[Scheduler] Error getting current quiz for pool sufficiency: %v", err)
+		return
+	}
+
+	count, err := s.repos.Questions.GetUnansweredCount(ctx, telegramID, currentQuiz.ID)
 	if err != nil {
 		log.Printf("[Scheduler] Error checking pool sufficiency for user %d: %v", telegramID, err)
 		return
 	}
 
 	if count < 2 {
-		log.Printf("[Scheduler] Pool low for user %d (topic: %s, count: %d). Seeding to buffer of 2...", telegramID, topic, count)
+		log.Printf("[Scheduler] Pool low for user %d (quiz: %s, count: %d). Seeding to buffer of 2...", telegramID, currentQuiz.Title, count)
 		go func() {
 			for i := count; i < 2; i++ {
 				log.Printf("[Scheduler] Background generation %d/2 for user %d", i+1, telegramID)
-				s.GenerateAndSaveQuiz()
-				// Small delay between generations if seeding multiple
+				s.GenerateAndSaveQuestion()
 				if i < 1 {
 					time.Sleep(1 * time.Second)
 				}
