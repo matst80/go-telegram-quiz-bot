@@ -41,7 +41,7 @@ func (b *Bot) handleLeaderboard(c telebot.Context) error {
 
 	msg := "🏆 **Leaderboard** 🏆\n\n"
 	for i, u := range users {
-		name := u.Username
+		name := escapeMarkdown(u.Username)
 		if name == "" {
 			name = fmt.Sprintf("User%d", u.TelegramID)
 		}
@@ -65,7 +65,7 @@ func (b *Bot) handlePlan(c telebot.Context) error {
 		"**Description:** %s\n"+
 		"**Progress:** %d/%d questions generated for this topic.\n\n"+
 		"Use /nextstep to skip to the next topic.",
-		currentQuiz.Title, currentQuiz.Description, count, quiz.QuizzesPerStep)
+		escapeMarkdown(currentQuiz.Title), escapeMarkdown(currentQuiz.Description), count, quiz.QuizzesPerStep)
 
 	return c.Send(msg, telebot.ModeMarkdown)
 }
@@ -82,7 +82,7 @@ func (b *Bot) handleNextStep(c telebot.Context) error {
 
 	msg := fmt.Sprintf("⏩ **Advanced to Next Step** ⏩\n\n"+
 		"The new topic is: **%s**\n\n"+
-		"The next quiz generated will be about this topic.", topic)
+		"The next quiz generated will be about this topic.", escapeMarkdown(topic))
 
 	return c.Send(msg, telebot.ModeMarkdown)
 }
@@ -113,7 +113,7 @@ func (b *Bot) handleQuiz(c telebot.Context) error {
 	if q == nil {
 		log.Printf("[Bot] No unanswered questions for user %d in topic '%s'. Triggering seed.", userID, topic)
 		b.scheduler.EnsurePoolSufficient(userID)
-		return c.Send("I'm preparing more questions for you on **"+topic+"**. Please try again in a few seconds!", telebot.ModeMarkdown)
+		return c.Send("I'm preparing more questions for you on **"+escapeMarkdown(topic)+"**. Please try again in a few seconds!", telebot.ModeMarkdown)
 	}
 
 	log.Printf("[Bot] Serving question ID %d to user %d", q.ID, userID)
@@ -135,7 +135,7 @@ func (b *Bot) handleQuiz(c telebot.Context) error {
 
 	menu.Inline(rows...)
 
-	msg := fmt.Sprintf("📝 **Topic:** %s\n\n**%s**", topic, q.Text)
+	msg := fmt.Sprintf("📝 **Topic:** %s\n\n**%s**", escapeMarkdown(topic), escapeMarkdown(q.Text))
 	if q.AudioFileID != "" {
 		audio := &telebot.Voice{File: telebot.FromDisk(q.AudioFileID), Caption: msg}
 		return c.Send(audio, menu, telebot.ModeMarkdown)
@@ -182,7 +182,7 @@ func (b *Bot) handleCallback(c telebot.Context) error {
 		return c.Respond(&telebot.CallbackResponse{Text: "You already answered this quiz!", ShowAlert: true})
 	}
 
-	msg := fmt.Sprintf("❌ Incorrect. The correct answer was: %s", q.CorrectAnswer)
+	msg := fmt.Sprintf("❌ Incorrect. The correct answer was: %s", escapeMarkdown(q.CorrectAnswer))
 	if isCorrect {
 		msg = "✅ Correct! +1 Point!"
 	}
@@ -219,7 +219,7 @@ func (b *Bot) handleCallback(c telebot.Context) error {
 			}
 			menu.Inline(rows...)
 
-			msg := fmt.Sprintf("📝 **Topic:** %s\n\n**%s**", topic, qNext.Text)
+			msg := fmt.Sprintf("📝 **Topic:** %s\n\n**%s**", escapeMarkdown(topic), escapeMarkdown(qNext.Text))
 			if qNext.AudioFileID != "" {
 				audio := &telebot.Voice{File: telebot.FromDisk(qNext.AudioFileID), Caption: msg}
 				b.teleBot.Send(c.Sender(), audio, menu, telebot.ModeMarkdown)
@@ -246,7 +246,7 @@ func (b *Bot) ensureLessonShown(c telebot.Context, userID int64, currentQuiz *do
 
 	lesson := currentQuiz.Description
 	if lesson != "" {
-		msg := fmt.Sprintf("📖 **Lesson: %s** 📖\n\n%s", currentQuiz.Title, lesson)
+		msg := fmt.Sprintf("📖 **Lesson: %s** 📖\n\n%s", escapeMarkdown(currentQuiz.Title), escapeMarkdown(lesson))
 		if _, err := c.Bot().Send(c.Sender(), msg, telebot.ModeMarkdown); err != nil {
 			return err
 		}

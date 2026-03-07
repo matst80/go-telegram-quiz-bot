@@ -97,10 +97,9 @@ func (b *Bot) BroadcastQuestion(questions []domain.Question) {
 		quizObj, _ := b.repos.Quizzes.GetByID(ctx, q.QuizID)
 		topic := "Unknown"
 		if quizObj != nil {
-			topic = quizObj.Title
+			topic = escapeMarkdown(quizObj.Title)
 		}
-
-		msg := fmt.Sprintf("🔔 **New Quizzes Available!** 🔔\n\n📝 **Topic:** %s\n\n**%s**", topic, q.Text)
+		msg := fmt.Sprintf("🔔 **New Quizzes Available!** 🔔\n\n📝 **Topic:** %s\n\n**%s**", topic, escapeMarkdown(q.Text))
 
 		var err error
 		if q.AudioFileID != "" {
