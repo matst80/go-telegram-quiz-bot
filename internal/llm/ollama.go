@@ -65,6 +65,7 @@ type ChatRequest struct {
 type ModelOptions struct {
 	Temperature float64 `json:"temperature,omitempty"`
 	NumPredict  int     `json:"num_predict,omitempty"`
+	NumCtx      int     `json:"num_ctx,omitempty"`
 }
 
 // ChatStreamChunk is a single streamed chunk from POST /api/chat.
@@ -105,35 +106,51 @@ var questionTool = Tool{
 					"type": "string",
 					"description": "The quiz question text, written in English"
 				},
-				"option_a": {
-					"type": "string",
-					"description": "First answer option"
-				},
-				"option_b": {
-					"type": "string",
-					"description": "Second answer option"
-				},
-				"option_c": {
-					"type": "string",
-					"description": "Third answer option"
-				},
-				"option_d": {
-					"type": "string",
-					"description": "Fourth answer option"
+				"options": {
+					"type": "array",
+					"items": { "type": "string" },
+					"description": "The answer options (usually 4, but can be fewer or more)"
 				},
 				"correct_index": {
 					"type": "integer",
-					"description": "The 0-based index of the correct answer (0 for option_a, 1 for option_b, 2 for option_c, 3 for option_d)"
+					"description": "The 0-based index of the correct answer in the options array"
 				},
 				"tts_phrase": {
 					"type": "string",
 					"description": "A short Spanish phrase or sentence featuring the tested word"
 				}
 			},
-			"required": ["text", "option_a", "option_b", "option_c", "option_d", "correct_index", "tts_phrase"]
+			"required": ["text", "options", "correct_index", "tts_phrase"]
 		}`),
 	},
 }
+
+// segmentTool defines the add_segment tool schema for the model.
+var segmentTool = Tool{
+	Type: "function",
+	Function: ToolFunction{
+		Name:        "add_segment",
+		Description: "Suggest a new Spanish learning segment for beginners. Call this once per segment.",
+		Parameters: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"title": {
+					"type": "string",
+					"description": "Short, descriptive title of the segment (e.g. 'At the Restaurant')"
+				},
+				"description": {
+					"type": "string",
+					"description": "Brief explanation of what the segment covers"
+				}
+			},
+			"required": ["title", "description"]
+		}`),
+	},
+}
+
+const suggestSystemPrompt = `You are a Spanish curriculum designer for beginners.
+Suggest new learning segments that logically follow the existing plan.
+For each segment, call the add_segment tool.`
 
 const questionSystemPrompt = `You are an expert Spanish teacher creating quiz questions for beginners.
 For each question, call the add_question tool. Generate all requested questions by calling the tool multiple times.
@@ -155,7 +172,19 @@ func (c *Client) GenerateSpanishQuestions(topic string, excludeQuestions []strin
 	for attempt := 1; attempt <= 3; attempt++ {
 		log.Printf("[LLM] Attempt %d", attempt)
 
-		questions, err := c.generateWithTools(questionSystemPrompt, userPrompt, questionTool)
+		var questions []domain.Question
+		err := c.generateStreamingTools(questionSystemPrompt, userPrompt, []Tool{questionTool}, func(tc ToolCall) error {
+			if tc.Function.Name != "add_question" {
+				return nil
+			}
+			q, err := toolCallToQuestion(tc.Function.Arguments)
+			if err != nil {
+				return err
+			}
+			questions = append(questions, q)
+			return nil
+		})
+
 		if err != nil {
 			lastErr = err
 			log.Printf("[LLM] Attempt %d failed: %v", attempt, err)
@@ -183,39 +212,68 @@ type SectionSuggestion struct {
 	Description string `json:"description"`
 }
 
-const suggestSystemPrompt = `You are a Spanish curriculum designer for beginners.
-Rules:
-- Output ONLY a JSON array of topic objects.
-- Each object must have: "title" (topic name), "description" (brief description of the topic).
-- Suggest topics that logically follow and build on what the student has already learned.
-- ALWAYS return a JSON array.`
-
-// SuggestSections asks the LLM to suggest new learning segments based on existing topics.
-func (c *Client) SuggestSections(existingTopics []string) ([]SectionSuggestion, error) {
+// SuggestSectionsWithPrompt asks the LLM to suggest new learning segments based on existing topics and an optional custom prompt.
+func (c *Client) SuggestSectionsWithPrompt(existingTopics []string, customPrompt string) ([]SectionSuggestion, error) {
 	topicList := "none yet"
 	if len(existingTopics) > 0 {
 		topicList = strings.Join(existingTopics, ", ")
 	}
 
-	userPrompt := fmt.Sprintf("The current learning plan covers: %s.\nSuggest 3 to 5 NEW topics. Return a JSON array.", topicList)
+	userPrompt := fmt.Sprintf("The current learning plan covers: %s.", topicList)
+	if customPrompt != "" {
+		userPrompt += "\nSpecial Instructions: " + customPrompt
+	} else {
+		userPrompt += "\nSuggest 3 to 5 NEW topics."
+	}
+	userPrompt += "\nCall add_segment for each suggestion."
 
-	raw, err := c.chatJSON(suggestSystemPrompt, userPrompt)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate section suggestions: %w", err)
+	log.Printf("[LLM] Suggesting sections based on: %s (custom prompt: %q)", topicList, customPrompt)
+
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		log.Printf("[LLM] Attempt %d", attempt)
+
+		var suggestions []SectionSuggestion
+		err := c.generateStreamingTools(suggestSystemPrompt, userPrompt, []Tool{segmentTool}, func(tc ToolCall) error {
+			if tc.Function.Name != "add_segment" {
+				return nil
+			}
+			title, _ := tc.Function.Arguments["title"].(string)
+			desc, _ := tc.Function.Arguments["description"].(string)
+			if title != "" {
+				suggestions = append(suggestions, SectionSuggestion{Title: title, Description: desc})
+			}
+			return nil
+		})
+
+		if err != nil {
+			lastErr = err
+			log.Printf("[LLM] Attempt %d failed: %v", attempt, err)
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+
+		if len(suggestions) == 0 {
+			lastErr = fmt.Errorf("model returned 0 tool calls")
+			log.Printf("[LLM] Attempt %d: no suggestions returned", attempt)
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+
+		log.Printf("[LLM] Generated %d suggestions on attempt %d", len(suggestions), attempt)
+		return suggestions, nil
 	}
 
-	jsonContent := extractJSON(raw)
-	var suggestions []SectionSuggestion
-	if err := json.Unmarshal([]byte(jsonContent), &suggestions); err != nil {
-		return nil, fmt.Errorf("failed to parse suggestions JSON: %w", err)
-	}
-
-	return suggestions, nil
+	return nil, fmt.Errorf("failed to suggest sections after 3 attempts: %w", lastErr)
 }
 
-// generateWithTools sends a streaming chat request with a tool definition.
-// Each tool call chunk is processed immediately as it arrives from the stream.
-func (c *Client) generateWithTools(system, user string, tool Tool) ([]domain.Question, error) {
+// SuggestSections is a convenience wrapper for backward compatibility.
+func (c *Client) SuggestSections(existingTopics []string) ([]SectionSuggestion, error) {
+	return c.SuggestSectionsWithPrompt(existingTopics, "")
+}
+
+// generateStreamingTools sends a streaming chat request with tool definitions and invokes the callback for each tool call.
+func (c *Client) generateStreamingTools(system, user string, tools []Tool, onToolCall func(ToolCall) error) error {
 	reqBody := ChatRequest{
 		Model: c.Model,
 		Messages: []ChatMessage{
@@ -223,89 +281,57 @@ func (c *Client) generateWithTools(system, user string, tool Tool) ([]domain.Que
 			{Role: "user", Content: user},
 		},
 		Stream: true,
-		Tools:  []Tool{tool},
+		Tools:  tools,
 		Options: &ModelOptions{
 			Temperature: 0.7,
+			NumCtx:      16000,
 		},
 	}
 
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+		return fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	req, err := http.NewRequest("POST", c.BaseURL+"/api/chat", bytes.NewBuffer(jsonData))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	start := time.Now()
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request to ollama failed: %w", err)
+		return fmt.Errorf("request to ollama failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, string(bodyBytes))
+		return fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	var questions []domain.Question
-	var textContent strings.Builder
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	chunks := 0
 
 	for scanner.Scan() {
 		var chunk ChatStreamChunk
 		if err := json.Unmarshal(scanner.Bytes(), &chunk); err != nil {
-			log.Printf("[LLM] Warning: failed to parse stream chunk: %v", err)
 			continue
 		}
-		chunks++
 
-		// Collect any text content (thinking tokens, etc.)
-		if chunk.Message.Content != "" {
-			textContent.WriteString(chunk.Message.Content)
-		}
-
-		// Process tool calls as they arrive
 		for _, tc := range chunk.Message.ToolCalls {
-			if tc.Function.Name != "add_question" {
-				log.Printf("[LLM] Warning: unexpected tool call %q, skipping", tc.Function.Name)
-				continue
+			if err := onToolCall(tc); err != nil {
+				log.Printf("[LLM] Tool call handler error: %v", err)
+				return err
 			}
-
-			q, err := toolCallToQuestion(tc.Function.Arguments)
-			if err != nil {
-				log.Printf("[LLM] Warning: tool call invalid: %v", err)
-				continue
-			}
-
-			questions = append(questions, q)
-			log.Printf("[LLM] ✓ Question %d streamed (%.1fs): %s",
-				len(questions), time.Since(start).Seconds(), q.Text)
 		}
 
 		if chunk.Done {
-			log.Printf("[LLM] Stream done: %d chunks, %d questions, %.1fs (eval: %dms)",
-				chunks, len(questions), time.Since(start).Seconds(), chunk.EvalDur/1_000_000)
 			break
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error reading ollama stream: %w", err)
-	}
-
-	// Log any text the model emitted (thinking, etc.) for debugging
-	if text := textContent.String(); text != "" {
-		log.Printf("[LLM] Model text output: %.500s", text)
-	}
-
-	return questions, nil
+	return scanner.Err()
 }
 
 // toolCallToQuestion converts tool call arguments to a domain.Question.
@@ -327,21 +353,23 @@ func toolCallToQuestion(args map[string]interface{}) (domain.Question, error) {
 		return domain.Question{}, err
 	}
 
-	optA, err := getString("option_a")
-	if err != nil {
-		return domain.Question{}, err
+	rawOptions, ok := args["options"]
+	if !ok {
+		return domain.Question{}, fmt.Errorf("missing field \"options\"")
 	}
-	optB, err := getString("option_b")
-	if err != nil {
-		return domain.Question{}, err
+
+	optionsArr, ok := rawOptions.([]interface{})
+	if !ok {
+		return domain.Question{}, fmt.Errorf("field \"options\" is not an array")
 	}
-	optC, err := getString("option_c")
-	if err != nil {
-		return domain.Question{}, err
-	}
-	optD, err := getString("option_d")
-	if err != nil {
-		return domain.Question{}, err
+
+	var options []string
+	for i, opt := range optionsArr {
+		s, ok := opt.(string)
+		if !ok {
+			return domain.Question{}, fmt.Errorf("option at index %d is not a string", i)
+		}
+		options = append(options, s)
 	}
 
 	correctIndexVal, ok := args["correct_index"]
@@ -364,10 +392,8 @@ func toolCallToQuestion(args map[string]interface{}) (domain.Question, error) {
 		return domain.Question{}, err
 	}
 
-	options := []string{optA, optB, optC, optD}
-
 	if correctIndex < 0 || correctIndex >= len(options) {
-		return domain.Question{}, fmt.Errorf("correct_index %d out of range (0-3)", correctIndex)
+		return domain.Question{}, fmt.Errorf("correct_index %d out of range (0-%d)", correctIndex, len(options)-1)
 	}
 	correct := options[correctIndex]
 
@@ -392,6 +418,7 @@ func (c *Client) chatJSON(system, user string) (string, error) {
 		Stream: false,
 		Options: &ModelOptions{
 			Temperature: 0.7,
+			NumCtx:      16000,
 		},
 	}
 

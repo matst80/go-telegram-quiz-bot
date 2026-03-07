@@ -67,10 +67,7 @@ func TestExtractJSON(t *testing.T) {
 func TestToolCallToQuestion(t *testing.T) {
 	args := map[string]interface{}{
 		"text":          "What does 'uno' mean?",
-		"option_a":      "One",
-		"option_b":      "Two",
-		"option_c":      "Three",
-		"option_d":      "Four",
+		"options":       []interface{}{"One", "Two", "Three", "Four"},
 		"correct_index": 0.0, // decoding from json can give float64
 		"tts_phrase":    "El número uno",
 	}
@@ -97,10 +94,7 @@ func TestToolCallToQuestion(t *testing.T) {
 func TestToolCallToQuestion_InvalidCorrectIndex(t *testing.T) {
 	args := map[string]interface{}{
 		"text":          "Test?",
-		"option_a":      "A",
-		"option_b":      "B",
-		"option_c":      "C",
-		"option_d":      "D",
+		"options":       []interface{}{"A", "B", "C", "D"},
 		"correct_index": 4, // Out of range
 		"tts_phrase":    "test",
 	}
@@ -122,16 +116,13 @@ func TestToolCallToQuestion_MissingField(t *testing.T) {
 	}
 }
 
-func makeQuestionToolCall(text, a, b, c, d string, correctIndex int, tts string) ToolCall {
+func makeQuestionToolCall(text string, options []string, correctIndex int, tts string) ToolCall {
 	return ToolCall{
 		Function: ToolCallFunction{
 			Name: "add_question",
 			Arguments: map[string]interface{}{
 				"text":          text,
-				"option_a":      a,
-				"option_b":      b,
-				"option_c":      c,
-				"option_d":      d,
+				"options":       options,
 				"correct_index": correctIndex,
 				"tts_phrase":    tts,
 			},
@@ -214,8 +205,8 @@ func TestClient_GenerateSpanishQuestions(t *testing.T) {
 	count := 2
 
 	toolCalls := []ToolCall{
-		makeQuestionToolCall("What does 'uno' mean?", "One", "Two", "Three", "Four", 0, "El número uno"),
-		makeQuestionToolCall("What does 'dos' mean?", "One", "Two", "Three", "Four", 1, "El número dos"),
+		makeQuestionToolCall("What does 'uno' mean?", []string{"One", "Two", "Three", "Four"}, 0, "El número uno"),
+		makeQuestionToolCall("What does 'dos' mean?", []string{"One", "Two", "Three", "Four"}, 1, "El número dos"),
 	}
 
 	ts := httptest.NewServer(streamingToolHandler(t, func(req *ChatRequest) {
@@ -306,27 +297,35 @@ func TestClient_Timeout(t *testing.T) {
 }
 
 func TestSuggestSections(t *testing.T) {
-	content := `[{"title": "Weather", "description": "Learn weather vocabulary"}, {"title": "Clothing", "description": "Learn clothing items"}]`
+	toolCalls := []ToolCall{
+		{
+			Function: ToolCallFunction{
+				Name: "add_segment",
+				Arguments: map[string]interface{}{
+					"title":       "Weather",
+					"description": "Learn weather vocabulary",
+				},
+			},
+		},
+		{
+			Function: ToolCallFunction{
+				Name: "add_segment",
+				Arguments: map[string]interface{}{
+					"title":       "Clothing",
+					"description": "Learn clothing items",
+				},
+			},
+		},
+	}
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		var req ChatRequest
-		json.Unmarshal(body, &req)
-
-		if req.Format != "json" {
-			t.Errorf("expected format=json for suggest, got %q", req.Format)
+	ts := httptest.NewServer(streamingToolHandler(t, func(req *ChatRequest) {
+		if req.Format != "" {
+			t.Errorf("expected no format for tool call suggest, got %q", req.Format)
 		}
-		if !strings.Contains(req.Messages[1].Content, "Basic Greetings") {
-			t.Errorf("user prompt should contain existing topics")
+		if len(req.Tools) == 0 || req.Tools[0].Function.Name != "add_segment" {
+			t.Errorf("expected add_segment tool to be provided")
 		}
-
-		resp := ChatStreamChunk{
-			Message: ChatMessage{Role: "assistant", Content: content},
-			Done:    true,
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}))
+	}, toolCalls))
 	defer ts.Close()
 
 	client := NewClient(ts.URL, "test-model")
@@ -345,9 +344,9 @@ func TestSuggestSections(t *testing.T) {
 
 func TestClient_SkipsBadToolCalls(t *testing.T) {
 	toolCalls := []ToolCall{
-		makeQuestionToolCall("Good question?", "A", "B", "C", "D", 0, "bueno"),
+		makeQuestionToolCall("Good question?", []string{"A", "B", "C", "D"}, 0, "bueno"),
 		{Function: ToolCallFunction{Name: "unknown_tool", Arguments: map[string]interface{}{}}},
-		makeQuestionToolCall("Another good one?", "X", "Y", "Z", "W", 0, "otro"),
+		makeQuestionToolCall("Another good one?", []string{"X", "Y", "Z", "W"}, 0, "otro"),
 	}
 
 	ts := httptest.NewServer(streamingToolHandler(t, nil, toolCalls))
@@ -366,7 +365,7 @@ func TestClient_SkipsBadToolCalls(t *testing.T) {
 func TestClient_StreamingWithThinkTokens(t *testing.T) {
 	// Verifies thinking content is captured but doesn't interfere with tool calls
 	toolCalls := []ToolCall{
-		makeQuestionToolCall("What is 'hola'?", "Hello", "Bye", "Yes", "No", 0, "Hola amigo"),
+		makeQuestionToolCall("What is 'hola'?", []string{"Hello", "Bye", "Yes", "No"}, 0, "Hola amigo"),
 	}
 
 	ts := httptest.NewServer(streamingToolHandler(t, nil, toolCalls))

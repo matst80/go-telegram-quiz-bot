@@ -16,6 +16,7 @@ export function Dashboard() {
 
   // AI suggestions state
   const [suggestions, setSuggestions] = useState<SectionSuggestion[]>([])
+  const [customPrompt, setCustomPrompt] = useState("")
   const [isSuggesting, setIsSuggesting] = useState(false)
   const [suggestError, setSuggestError] = useState("")
   const [acceptedTitles, setAcceptedTitles] = useState<Set<string>>(new Set())
@@ -51,7 +52,7 @@ export function Dashboard() {
     setSuggestions([])
     setAcceptedTitles(new Set())
     try {
-      const data = await suggestSections()
+      const data = await suggestSections(customPrompt)
       setSuggestions(data)
     } catch (err) {
       setSuggestError("Failed to get AI suggestions. Is the LLM running?")
@@ -83,15 +84,25 @@ export function Dashboard() {
           <p className="text-slate-500 mt-1">Manage the overall curriculum segments.</p>
         </div>
         <div className="flex gap-2">
-          <Button
-            onClick={handleSuggest}
-            disabled={isSuggesting}
-            variant="outline"
-            className="gap-2 border-purple-200 text-purple-700 hover:bg-purple-50 hover:border-purple-300"
-          >
-            {isSuggesting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-            {isSuggesting ? "Thinking..." : "AI Suggest"}
-          </Button>
+          <div className="flex bg-slate-100 p-1 rounded-md border border-slate-200">
+            <input
+              type="text"
+              value={customPrompt}
+              onChange={(e) => setCustomPrompt(e.target.value)}
+              placeholder="e.g. Travel tips..."
+              className="bg-transparent border-none focus:ring-0 text-sm px-2 w-48"
+            />
+            <Button
+              onClick={handleSuggest}
+              disabled={isSuggesting}
+              variant="ghost"
+              size="sm"
+              className="gap-2 text-purple-700 hover:bg-purple-100"
+            >
+              {isSuggesting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+              {isSuggesting ? "Thinking..." : "AI Suggest"}
+            </Button>
+          </div>
           <Button onClick={() => setIsAdding(!isAdding)} className="gap-2">
             {isAdding ? "Cancel" : <><Plus className="h-4 w-4" /> Add Segment</>}
           </Button>

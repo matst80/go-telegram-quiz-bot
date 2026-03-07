@@ -9,6 +9,15 @@ import (
 
 func (s *Server) handleSuggestSegments(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
+	// Optional request body for custom context/prompts
+	var req struct {
+		Prompt string `json:"prompt"`
+	}
+	if r.ContentLength > 0 {
+		json.NewDecoder(r.Body).Decode(&req)
+	}
+
 	segments, err := s.repos.Segments.GetAll(ctx)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to fetch segments")
@@ -20,7 +29,8 @@ func (s *Server) handleSuggestSegments(w http.ResponseWriter, r *http.Request) {
 		topics = append(topics, seg.Title)
 	}
 
-	suggestions, err := s.llm.SuggestSections(topics)
+	// If prompt is empty, use default suggestion logic
+	suggestions, err := s.llm.SuggestSectionsWithPrompt(topics, req.Prompt)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to generate suggestions: "+err.Error())
 		return

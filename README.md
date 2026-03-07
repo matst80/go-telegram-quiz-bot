@@ -57,6 +57,17 @@ Questions are automatically generated based on the active step in the learning p
 *   Send `/nextstep` to manually advance the learning plan.
 *   Send `/leaderboard` to view the top scorers.
 
+## Management Dashboard
+
+The bot comes with a built-in management dashboard (React) for curriculum design:
+
+### AI Segment Suggestions
+You can use the **AI Suggest** button on the dashboard to generate new learning segments.
+- **Custom Prompts**: Enter a theme (e.g., "Medical Spanish") in the prompt field to get specific suggestions.
+- **Reliability**: Uses LLM tool calling (streaming) for robust and fast generation of curriculum segments.
+- **Acceptance Flow**: Review generated segments and click "Accept" to add them to your learning plan.
+
 ## Extensibility
 
 This bot natively stores an `audio_file_id` column in the `quizzes` table in preparation for sending voice notes (TTS) in the future.
+

@@ -84,8 +84,12 @@ export async function deleteQuestion(id: number) {
   return res.json()
 }
 
-export async function suggestSections() {
-  const res = await fetch(`${API_URL}/segments/suggest`, { method: "POST" })
+export async function suggestSections(prompt?: string) {
+  const res = await fetch(`${API_URL}/segments/suggest`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt }),
+  })
   if (!res.ok) throw new Error("Failed to get AI suggestions")
   return res.json()
 }
