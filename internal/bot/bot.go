@@ -68,6 +68,10 @@ func (b *Bot) Stop() {
 }
 
 func (b *Bot) BroadcastQuestion(questions []domain.Question) {
+	if len(questions) == 0 {
+		return
+	}
+
 	ctx := context.Background()
 	users, err := b.repos.Users.GetAllUsers(ctx)
 	if err != nil {
@@ -76,7 +80,7 @@ func (b *Bot) BroadcastQuestion(questions []domain.Question) {
 	}
 
 	for _, user := range users {
-		log.Printf("[Bot] Broadcasting batch of %d questions to user %d", len(questions), user.TelegramID)
+		log.Printf("[Bot] Broadcasting first question of batch (size %d) to user %d", len(questions), user.TelegramID)
 
 		q := questions[0]
 		target := &telebot.User{ID: user.TelegramID}

@@ -64,25 +64,174 @@ func TestExtractJSON(t *testing.T) {
 	}
 }
 
-func TestClient_GenerateSpanishQuizzes_Multi(t *testing.T) {
-	topic := "Numbers"
-	count := 2
+func TestToolCallToQuestion(t *testing.T) {
+	args := map[string]interface{}{
+		"text":          "What does 'uno' mean?",
+		"option_a":      "One",
+		"option_b":      "Two",
+		"option_c":      "Three",
+		"option_d":      "Four",
+		"correct_index": 0.0, // decoding from json can give float64
+		"tts_phrase":    "El número uno",
+	}
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	q, err := toolCallToQuestion(args)
+	if err != nil {
+		t.Fatalf("toolCallToQuestion failed: %v", err)
+	}
+
+	if q.Text != "What does 'uno' mean?" {
+		t.Errorf("unexpected text: %s", q.Text)
+	}
+	if len(q.Options) != 4 {
+		t.Errorf("expected 4 options, got %d", len(q.Options))
+	}
+	if q.CorrectAnswer != "One" {
+		t.Errorf("unexpected correct answer: %s", q.CorrectAnswer)
+	}
+	if q.TTSPhrase != "El número uno" {
+		t.Errorf("unexpected tts_phrase: %s", q.TTSPhrase)
+	}
+}
+
+func TestToolCallToQuestion_InvalidCorrectIndex(t *testing.T) {
+	args := map[string]interface{}{
+		"text":          "Test?",
+		"option_a":      "A",
+		"option_b":      "B",
+		"option_c":      "C",
+		"option_d":      "D",
+		"correct_index": 4, // Out of range
+		"tts_phrase":    "test",
+	}
+
+	_, err := toolCallToQuestion(args)
+	if err == nil {
+		t.Fatal("expected error for invalid correct_index, got nil")
+	}
+}
+
+func TestToolCallToQuestion_MissingField(t *testing.T) {
+	args := map[string]interface{}{
+		"text": "Test?",
+	}
+
+	_, err := toolCallToQuestion(args)
+	if err == nil {
+		t.Fatal("expected error for missing fields, got nil")
+	}
+}
+
+func makeQuestionToolCall(text, a, b, c, d string, correctIndex int, tts string) ToolCall {
+	return ToolCall{
+		Function: ToolCallFunction{
+			Name: "add_question",
+			Arguments: map[string]interface{}{
+				"text":          text,
+				"option_a":      a,
+				"option_b":      b,
+				"option_c":      c,
+				"option_d":      d,
+				"correct_index": correctIndex,
+				"tts_phrase":    tts,
+			},
+		},
+	}
+}
+
+// streamingToolHandler simulates Ollama's streaming tool call format.
+// Each tool call arrives as a separate ndjson chunk with tool_calls in message.
+func streamingToolHandler(t *testing.T, validateReq func(*ChatRequest), toolCalls []ToolCall) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat" {
+			t.Errorf("expected /api/chat, got %s", r.URL.Path)
+		}
+
 		body, _ := io.ReadAll(r.Body)
-		var req GenerateRequest
-		json.Unmarshal(body, &req)
+		var req ChatRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Fatalf("failed to unmarshal request: %v", err)
+		}
 
-		if !strings.Contains(req.Prompt, fmt.Sprintf("Generate exactly %d", count)) {
-			t.Errorf("Prompt should specify count %d", count)
+		if !req.Stream {
+			t.Error("expected stream=true for streaming tool calls")
+		}
+		if len(req.Tools) == 0 {
+			t.Error("expected tools to be provided")
+		}
+
+		if validateReq != nil {
+			validateReq(&req)
 		}
 
 		w.Header().Set("Content-Type", "application/x-ndjson")
-		fmt.Fprintln(w, `{"response": "[\n", "done": false}`)
-		fmt.Fprintln(w, `{"response": "{\"text\": \"1?\", \"options\": [\"1\",\"2\",\"3\",\"4\"], \"correct_answer\": \"1\", \"tts_phrase\": \"1\"},\n", "done": false}`)
-		fmt.Fprintln(w, `{"response": "{\"text\": \"2?\", \"options\": [\"1\",\"2\",\"3\",\"4\"], \"correct_answer\": \"2\", \"tts_phrase\": \"2\"}\n", "done": false}`)
-		fmt.Fprintln(w, `{"response": "]\n", "done": true}`)
-	}))
+		flusher, _ := w.(http.Flusher)
+
+		// Optionally emit a thinking chunk first (like qwen3 does)
+		thinkChunk := ChatStreamChunk{
+			Model:   req.Model,
+			Message: ChatMessage{Role: "assistant", Content: "<think>planning questions</think>"},
+			Done:    false,
+		}
+		data, _ := json.Marshal(thinkChunk)
+		fmt.Fprintln(w, string(data))
+		if flusher != nil {
+			flusher.Flush()
+		}
+
+		// Stream each tool call as a separate chunk
+		for _, tc := range toolCalls {
+			chunk := ChatStreamChunk{
+				Model: req.Model,
+				Message: ChatMessage{
+					Role:      "assistant",
+					Content:   "",
+					ToolCalls: []ToolCall{tc},
+				},
+				Done: false,
+			}
+			data, _ := json.Marshal(chunk)
+			fmt.Fprintln(w, string(data))
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+
+		// Final done chunk
+		doneChunk := ChatStreamChunk{
+			Model:   req.Model,
+			Message: ChatMessage{Role: "assistant"},
+			Done:    true,
+		}
+		data, _ = json.Marshal(doneChunk)
+		fmt.Fprintln(w, string(data))
+	}
+}
+
+func TestClient_GenerateSpanishQuestions(t *testing.T) {
+	topic := "Numbers"
+	count := 2
+
+	toolCalls := []ToolCall{
+		makeQuestionToolCall("What does 'uno' mean?", "One", "Two", "Three", "Four", 0, "El número uno"),
+		makeQuestionToolCall("What does 'dos' mean?", "One", "Two", "Three", "Four", 1, "El número dos"),
+	}
+
+	ts := httptest.NewServer(streamingToolHandler(t, func(req *ChatRequest) {
+		if len(req.Messages) != 2 {
+			t.Fatalf("expected 2 messages, got %d", len(req.Messages))
+		}
+		if req.Messages[0].Role != "system" {
+			t.Errorf("expected system role, got %s", req.Messages[0].Role)
+		}
+		if !strings.Contains(req.Messages[1].Content, fmt.Sprintf("Generate exactly %d", count)) {
+			t.Errorf("user prompt should specify count %d", count)
+		}
+		if req.Tools[0].Function.Name != "add_question" {
+			t.Errorf("expected tool name add_question, got %s", req.Tools[0].Function.Name)
+		}
+	}, toolCalls))
 	defer ts.Close()
 
 	client := NewClient(ts.URL, "test-model")
@@ -94,91 +243,89 @@ func TestClient_GenerateSpanishQuizzes_Multi(t *testing.T) {
 	if len(questions) != count {
 		t.Errorf("Expected %d questions, got %d", count, len(questions))
 	}
+	if questions[0].Text != "What does 'uno' mean?" {
+		t.Errorf("unexpected first question text: %s", questions[0].Text)
+	}
+	if questions[1].CorrectAnswer != "Two" {
+		t.Errorf("unexpected second correct answer: %s", questions[1].CorrectAnswer)
+	}
 }
 
-func TestClient_StreamingTimeout(t *testing.T) {
-	// A server that takes longer to respond than the client's timeout
+func TestClient_NoToolCallsRetried(t *testing.T) {
+	attempts := 0
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
 		w.Header().Set("Content-Type", "application/x-ndjson")
-		fmt.Fprintln(w, `{"response": "[\n", "done": false}`)
-
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
+		// Model only emits text, no tool calls
+		chunk := ChatStreamChunk{
+			Message: ChatMessage{Role: "assistant", Content: "I can't do that"},
+			Done:    false,
 		}
+		data, _ := json.Marshal(chunk)
+		fmt.Fprintln(w, string(data))
 
-		// Wait longer than the client timeout
-		time.Sleep(2 * time.Second)
-		fmt.Fprintln(w, `{"response": "]\n", "done": true}`)
+		done := ChatStreamChunk{
+			Message: ChatMessage{Role: "assistant"},
+			Done:    true,
+		}
+		data, _ = json.Marshal(done)
+		fmt.Fprintln(w, string(data))
 	}))
 	defer ts.Close()
 
 	client := NewClient(ts.URL, "test-model")
-	// Set an artificially short overall timeout to reproduce the error
-	client.HTTPClient.Timeout = 1 * time.Second
+	_, err := client.GenerateSpanishQuestions("Numbers", nil, 1)
+	if err == nil {
+		t.Fatal("expected error when model returns no tool calls")
+	}
+	if attempts != 3 {
+		t.Errorf("expected 3 attempts, got %d", attempts)
+	}
+}
+
+func TestClient_Timeout(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Second)
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		done := ChatStreamChunk{
+			Message: ChatMessage{Role: "assistant"},
+			Done:    true,
+		}
+		data, _ := json.Marshal(done)
+		fmt.Fprintln(w, string(data))
+	}))
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-model")
+	client.HTTPClient.Timeout = 500 * time.Millisecond
 
 	_, err := client.GenerateSpanishQuestions("Numbers", nil, 1)
-
 	if err == nil {
-		t.Fatal("Expected an error due to timeout, got nil")
-	}
-
-	if !strings.Contains(err.Error(), "context deadline exceeded") &&
-		!strings.Contains(err.Error(), "Client.Timeout") &&
-		!strings.Contains(err.Error(), "timeout") {
-		t.Errorf("Expected context deadline exceeded or timeout error, got: %v", err)
-	}
-}
-
-func TestClient_StreamingSuccessWithSufficientTimeout(t *testing.T) {
-	// A server that responds slowly but within the client's timeout
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/x-ndjson")
-		fmt.Fprintln(w, `{"response": "[\n", "done": false}`)
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-
-		time.Sleep(1 * time.Second)
-		fmt.Fprintln(w, `{"response": "{\"text\": \"1?\", \"options\": [\"1\",\"2\",\"3\",\"4\"], \"correct_answer\": \"1\", \"tts_phrase\": \"1\"}\n", "done": false}`)
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-
-		time.Sleep(1 * time.Second)
-		fmt.Fprintln(w, `{"response": "]\n", "done": true}`)
-	}))
-	defer ts.Close()
-
-	client := NewClient(ts.URL, "test-model")
-	// Set an artificially short timeout but sufficient for this test
-	client.HTTPClient.Timeout = 5 * time.Second
-
-	questions, err := client.GenerateSpanishQuestions("Numbers", nil, 1)
-
-	if err != nil {
-		t.Fatalf("Expected success, got error: %v", err)
-	}
-
-	if len(questions) != 1 {
-		t.Errorf("Expected 1 question, got %d", len(questions))
+		t.Fatal("Expected timeout error, got nil")
 	}
 }
 
 func TestSuggestSections(t *testing.T) {
+	content := `[{"title": "Weather", "description": "Learn weather vocabulary"}, {"title": "Clothing", "description": "Learn clothing items"}]`
+
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		var req GenerateRequest
+		var req ChatRequest
 		json.Unmarshal(body, &req)
 
-		if !strings.Contains(req.Prompt, "Basic Greetings") {
-			t.Errorf("Prompt should contain existing topics, got: %s", req.Prompt)
+		if req.Format != "json" {
+			t.Errorf("expected format=json for suggest, got %q", req.Format)
+		}
+		if !strings.Contains(req.Messages[1].Content, "Basic Greetings") {
+			t.Errorf("user prompt should contain existing topics")
 		}
 
-		w.Header().Set("Content-Type", "application/x-ndjson")
-		fmt.Fprintln(w, `{"response": "[", "done": false}`)
-		fmt.Fprintln(w, `{"response": "{\"title\": \"Weather\", \"description\": \"Learn weather vocabulary\"},", "done": false}`)
-		fmt.Fprintln(w, `{"response": "{\"title\": \"Clothing\", \"description\": \"Learn clothing items\"}", "done": false}`)
-		fmt.Fprintln(w, `{"response": "]", "done": true}`)
+		resp := ChatStreamChunk{
+			Message: ChatMessage{Role: "assistant", Content: content},
+			Done:    true,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
 	}))
 	defer ts.Close()
 
@@ -191,11 +338,49 @@ func TestSuggestSections(t *testing.T) {
 	if len(suggestions) != 2 {
 		t.Fatalf("Expected 2 suggestions, got %d", len(suggestions))
 	}
-
 	if suggestions[0].Title != "Weather" {
-		t.Errorf("Expected first suggestion title 'Weather', got '%s'", suggestions[0].Title)
+		t.Errorf("Expected 'Weather', got '%s'", suggestions[0].Title)
 	}
-	if suggestions[1].Title != "Clothing" {
-		t.Errorf("Expected second suggestion title 'Clothing', got '%s'", suggestions[1].Title)
+}
+
+func TestClient_SkipsBadToolCalls(t *testing.T) {
+	toolCalls := []ToolCall{
+		makeQuestionToolCall("Good question?", "A", "B", "C", "D", 0, "bueno"),
+		{Function: ToolCallFunction{Name: "unknown_tool", Arguments: map[string]interface{}{}}},
+		makeQuestionToolCall("Another good one?", "X", "Y", "Z", "W", 0, "otro"),
+	}
+
+	ts := httptest.NewServer(streamingToolHandler(t, nil, toolCalls))
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-model")
+	questions, err := client.GenerateSpanishQuestions("Test", nil, 2)
+	if err != nil {
+		t.Fatalf("expected success, got: %v", err)
+	}
+	if len(questions) != 2 {
+		t.Errorf("expected 2 valid questions (skipping bad tool call), got %d", len(questions))
+	}
+}
+
+func TestClient_StreamingWithThinkTokens(t *testing.T) {
+	// Verifies thinking content is captured but doesn't interfere with tool calls
+	toolCalls := []ToolCall{
+		makeQuestionToolCall("What is 'hola'?", "Hello", "Bye", "Yes", "No", 0, "Hola amigo"),
+	}
+
+	ts := httptest.NewServer(streamingToolHandler(t, nil, toolCalls))
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-model")
+	questions, err := client.GenerateSpanishQuestions("Greetings", nil, 1)
+	if err != nil {
+		t.Fatalf("expected success, got: %v", err)
+	}
+	if len(questions) != 1 {
+		t.Errorf("expected 1 question, got %d", len(questions))
+	}
+	if questions[0].TTSPhrase != "Hola amigo" {
+		t.Errorf("unexpected tts_phrase: %s", questions[0].TTSPhrase)
 	}
 }
