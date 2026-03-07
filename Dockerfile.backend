@@ -1,0 +1,65 @@
+# Stage 1: Build the frontend
+FROM node:20-bookworm-slim AS frontend-builder
+WORKDIR /app/frontend
+COPY frontend/package*.json ./
+RUN npm install
+COPY frontend/ .
+RUN npm run build
+
+# Stage 2: Build the Go application
+FROM golang:1.24-bookworm AS go-builder
+WORKDIR /app
+
+# Install dependencies for CGO (sqlite3 and possibly TTS libs)
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libc6-dev \
+    sqlite3 \
+    libsqlite3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy go mod and sum files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy the rest of the source code
+COPY . .
+
+# Build the application
+# CGO_ENABLED=1 is required for sqlite3
+RUN CGO_ENABLED=1 GOOS=linux go build -o quizbot ./cmd/bot/main.go
+
+# Stage 3: Runtime stage
+FROM debian:bookworm-slim
+
+WORKDIR /app
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    sqlite3 \
+    libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the binary from the builder
+COPY --from=go-builder /app/quizbot .
+
+# Copy the built frontend from the frontend-builder
+COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
+
+# Copy static assets if any (like intro.md, LEARNINGPLAN.md)
+COPY *.md ./
+
+# Create storage directory for database and audio
+RUN mkdir -p storage/audio storage/tts_model
+
+# Environment variables with defaults
+ENV HTTP_PORT=8080
+ENV DB_PATH=/app/storage/quizbot.db
+ENV OLLAMA_URL=http://host.docker.internal:11434
+ENV OLLAMA_MODEL=qwen2.5:4b
+
+EXPOSE 8080
+
+# Command to run the application
+CMD ["./quizbot"]

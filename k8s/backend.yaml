@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quiz-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: quiz-backend
+  template:
+    metadata:
+      labels:
+        app: quiz-backend
+    spec:
+      containers:
+      - name: quiz-backend
+        image: your-registry/quiz-backend:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: TELEGRAM_BOT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: quizbot-secrets
+              key: TELEGRAM_BOT_TOKEN
+        - name: DB_PATH
+          value: /app/storage/quizbot.db
+        - name: HTTP_PORT
+          value: "8080"
+        - name: OLLAMA_URL
+          value: "http://10.10.11.33:11434" # Adjust if ollama is in-cluster
+        volumeMounts:
+        - name: storage
+          mountPath: /app/storage
+      volumes:
+      - name: storage
+        persistentVolumeClaim:
+          claimName: quizbot-storage
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: quiz-backend
+spec:
+  selector:
+    app: quiz-backend
+  ports:
+  - protocol: TCP
+    port: 8080
+    targetPort: 8080

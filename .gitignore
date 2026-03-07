@@ -3,3 +3,4 @@ mcp-server/node_modules/
 frontend/node_modules/
 internal/tts/testdata/
 storage/
+k8s/secrets.yaml

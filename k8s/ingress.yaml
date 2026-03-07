@@ -1,0 +1,37 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: quizbot-ingress
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  tls:
+  - hosts:
+    - spanska.k6n.net
+    secretName: spanska-k6n-net-tls
+  rules:
+  - host: spanska.k6n.net
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: quiz-backend
+            port:
+              number: 8080
+      - path: /sse
+        pathType: Prefix
+        backend:
+          service:
+            name: mcp-server
+            port:
+              number: 3001
+      - path: /messages
+        pathType: Prefix
+        backend:
+          service:
+            name: mcp-server
+            port:
+              number: 3001

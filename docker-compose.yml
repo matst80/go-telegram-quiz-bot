@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  quiz-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: quiz-backend
+    ports:
+      - "8080:8080"
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - HTTP_PORT=8080
+      - DB_PATH=/app/storage/quizbot.db
+      - OLLAMA_URL=http://host.docker.internal:11434
+      - OLLAMA_MODEL=qwen2.5:4b
+    volumes:
+      - ./storage:/app/storage
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    container_name: mcp-server
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - API_BASE_URL=http://quiz-backend:8080/api
+    depends_on:
+      - quiz-backend
+    restart: unless-stopped
+
+networks:
+  default:
+    name: quiz-bot-network
