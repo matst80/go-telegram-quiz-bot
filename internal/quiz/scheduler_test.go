@@ -8,7 +8,7 @@ import (
 )
 
 func TestSchedulerStart(t *testing.T) {
-	s := NewScheduler(&repository.Repositories{}, &llm.Client{}, &PlanManager{})
+	s := NewScheduler(&repository.Repositories{}, &llm.Client{}, &PlanManager{}, nil)
 
 	err := s.Start("0 0 * * *")
 	if err != nil {

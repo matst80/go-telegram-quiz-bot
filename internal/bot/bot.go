@@ -97,7 +97,14 @@ func (b *Bot) BroadcastQuestion(questions []domain.Question) {
 		}
 
 		msg := fmt.Sprintf("🔔 **New Quizzes Available!** 🔔\n\n📝 **Topic:** %s\n\n**%s**", topic, q.Text)
-		_, err := b.teleBot.Send(target, msg, menu, telebot.ModeMarkdown)
+
+		var err error
+		if q.AudioFileID != "" {
+			audio := &telebot.Voice{File: telebot.FromDisk(q.AudioFileID), Caption: msg}
+			_, err = b.teleBot.Send(target, audio, menu, telebot.ModeMarkdown)
+		} else {
+			_, err = b.teleBot.Send(target, msg, menu, telebot.ModeMarkdown)
+		}
 		if err != nil {
 			log.Printf("[Bot] Failed to send broadcast to user %d: %v", user.TelegramID, err)
 		}

@@ -1,2 +1,4 @@
 node_modules/
 frontend/node_modules/
+internal/tts/testdata/
+storage/

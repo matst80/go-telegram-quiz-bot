@@ -7,6 +7,28 @@ import (
 	"github.com/mats/telegram-quiz-bot/internal/domain"
 )
 
+func (s *Server) handleSuggestSegments(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	segments, err := s.repos.Segments.GetAll(ctx)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to fetch segments")
+		return
+	}
+
+	var topics []string
+	for _, seg := range segments {
+		topics = append(topics, seg.Title)
+	}
+
+	suggestions, err := s.llm.SuggestSections(topics)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to generate suggestions: "+err.Error())
+		return
+	}
+
+	respondJSON(w, http.StatusOK, suggestions)
+}
+
 func (s *Server) handleGetPlan(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	segments, err := s.repos.Segments.GetAll(ctx)
@@ -17,8 +39,8 @@ func (s *Server) handleGetPlan(w http.ResponseWriter, r *http.Request) {
 
 	// We'll build a custom struct to return the hierarchical plan
 	type PlanSegment struct {
-		domain.Segment
-		Quizzes []domain.Quiz `json:"quizzes"`
+		Segment domain.Segment `json:"segment"`
+		Quizzes []domain.Quiz  `json:"quizzes"`
 	}
 
 	var plan []PlanSegment

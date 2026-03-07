@@ -28,6 +28,7 @@ type Question struct {
 	Text          string    `json:"text"`
 	Options       []string  `json:"options"`
 	CorrectAnswer string    `json:"correct_answer"`
+	TTSPhrase     string    `json:"tts_phrase,omitempty"`
 	AudioFileID   string    `json:"audio_file_id,omitempty"`
 	IsActive      bool      `json:"is_active"`
 	CreatedAt     time.Time `json:"created_at"`

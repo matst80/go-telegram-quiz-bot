@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS questions (
 	text TEXT,
 	options TEXT, -- JSON array
 	correct_answer TEXT,
+	tts_phrase TEXT DEFAULT '',
 	audio_file_id TEXT,
 	is_active BOOLEAN DEFAULT 0,
 	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -195,8 +196,8 @@ func migrateData(db *sql.DB) error {
 
 		newQuizID := topicToQuizID[topic]
 
-		insRes, err := db.Exec("INSERT INTO questions (quiz_id, text, options, correct_answer, audio_file_id, is_active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-			newQuizID, text, options, correctAnswer, audioFileID, isActive, createdAt)
+		insRes, err := db.Exec("INSERT INTO questions (quiz_id, text, options, correct_answer, tts_phrase, audio_file_id, is_active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			newQuizID, text, options, correctAnswer, "", audioFileID, isActive, createdAt)
 		if err != nil {
 			return err
 		}
@@ -254,27 +255,149 @@ func initDefaultPlan(db *sql.DB) {
 
 	log.Println("Initializing default learning plan in database...")
 
-	// Default segment
-	res, err := db.Exec("INSERT INTO segments (title, description, order_index) VALUES (?, ?, ?)",
-		"Basic Spanish Vocabulary", "Introductory words and phrases", 0)
-	if err != nil {
-		log.Printf("failed to create default segment: %v", err)
-		return
+	segmentsData := []struct {
+		Title       string
+		Description string
+		Order       int
+		Topics      []string
+	}{
+		{
+			Title:       "Basics",
+			Description: "Core greetings, numbers, and colors.",
+			Order:       0,
+			Topics: []string{
+				"Basic Greetings (Hola, Adiós, Buenos días)",
+				"Numbers 1 to 10",
+				"Colors (Red, Blue, Green, Yellow)",
+			},
+		},
+		{
+			Title:       "Everyday Life",
+			Description: "Family, days of the week, and months.",
+			Order:       1,
+			Topics: []string{
+				"Family Members (Padre, Madre, Hermano)",
+				"Days of the Week",
+				"Months of the Year",
+			},
+		},
+		{
+			Title:       "Advanced Basics",
+			Description: "Animals, food, verbs, and time.",
+			Order:       2,
+			Topics: []string{
+				"Common Animals (Dog, Cat, Bird)",
+				"Basic Foods (Bread, Water, Apple)",
+				"Basic Verbs (To be, To have, To go)",
+				"Telling Time in Spanish",
+			},
+		},
+		{
+			Title:       "Travel & Directions",
+			Description: "Navigating cities, transportation, and asking for help.",
+			Order:       3,
+			Topics: []string{
+				"Transportation (Train, Bus, Airport)",
+				"Asking for Directions",
+				"Booking a Hotel",
+			},
+		},
+		{
+			Title:       "Dining Out",
+			Description: "Ordering food, interacting with waiters, and understanding menus.",
+			Order:       4,
+			Topics: []string{
+				"Ordering at a Restaurant",
+				"Beverages and Drinks",
+				"Paying the Bill",
+			},
+		},
+		{
+			Title:       "Shopping & Clothing",
+			Description: "Buying clothes, asking for prices, and discussing colors/sizes.",
+			Order:       5,
+			Topics: []string{
+				"Types of Clothing",
+				"Asking for Prices",
+				"Colors and Sizes",
+			},
+		},
+		{
+			Title:       "House & Home",
+			Description: "Rooms in a house, furniture, and household chores.",
+			Order:       6,
+			Topics: []string{
+				"Rooms of the House",
+				"Furniture and Appliances",
+				"Household Chores",
+			},
+		},
+		{
+			Title:       "Health & Body",
+			Description: "Body parts, describing symptoms, and visiting the doctor.",
+			Order:       7,
+			Topics: []string{
+				"Parts of the Body",
+				"Common Illnesses and Symptoms",
+				"At the Doctor's Office",
+			},
+		},
+		{
+			Title:       "Hobbies & Leisure",
+			Description: "Activities, sports, and discussing free time.",
+			Order:       8,
+			Topics: []string{
+				"Common Hobbies",
+				"Sports and Games",
+				"Music and Entertainment",
+			},
+		},
+		{
+			Title:       "Work & Profession",
+			Description: "Jobs, describing a typical workday, and office vocabulary.",
+			Order:       9,
+			Topics: []string{
+				"Common Professions",
+				"Office Tools and Environment",
+				"Describing Work Duties",
+			},
+		},
+		{
+			Title:       "Grammar Deep Dive I",
+			Description: "Present tense, articles, and adjectives.",
+			Order:       10,
+			Topics: []string{
+				"Definite and Indefinite Articles",
+				"Regular Verbs in Present Tense (-ar, -er, -ir)",
+				"Adjective Agreement",
+			},
+		},
+		{
+			Title:       "Grammar Deep Dive II",
+			Description: "Past tenses, prepositions, and pronouns.",
+			Order:       11,
+			Topics: []string{
+				"Preterite Tense (Basic Regular Verbs)",
+				"Direct and Indirect Object Pronouns",
+				"Common Prepositions (Por vs. Para basics)",
+			},
+		},
 	}
 
-	segID, _ := res.LastInsertId()
+	for _, segData := range segmentsData {
+		res, err := db.Exec("INSERT INTO segments (title, description, order_index) VALUES (?, ?, ?)",
+			segData.Title, segData.Description, segData.Order)
+		if err != nil {
+			log.Printf("failed to create segment %s: %v", segData.Title, err)
+			continue
+		}
 
-	// Default quizzes
-	topics := []string{
-		"Basic Greetings (Hola, Adiós, Buenos días)",
-		"Numbers 1 to 10",
-		"Colors (Red, Blue, Green, Yellow)",
-		"Family Members (Padre, Madre, Hermano)",
-	}
+		segID, _ := res.LastInsertId()
 
-	for i, topic := range topics {
-		db.Exec("INSERT INTO quizzes (segment_id, title, description, order_index) VALUES (?, ?, ?, ?)",
-			segID, topic, "Learn about "+topic, i)
+		for i, topic := range segData.Topics {
+			db.Exec("INSERT INTO quizzes (segment_id, title, description, order_index) VALUES (?, ?, ?, ?)",
+				segID, topic, "Learn about "+topic, i)
+		}
 	}
 }
 

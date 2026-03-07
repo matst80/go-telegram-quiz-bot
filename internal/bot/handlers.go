@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mats/telegram-quiz-bot/internal/quiz"
 	"github.com/mats/telegram-quiz-bot/internal/domain"
+	"github.com/mats/telegram-quiz-bot/internal/quiz"
 	"gopkg.in/telebot.v3"
 )
 
@@ -136,6 +136,10 @@ func (b *Bot) handleQuiz(c telebot.Context) error {
 	menu.Inline(rows...)
 
 	msg := fmt.Sprintf("📝 **Topic:** %s\n\n**%s**", topic, q.Text)
+	if q.AudioFileID != "" {
+		audio := &telebot.Voice{File: telebot.FromDisk(q.AudioFileID), Caption: msg}
+		return c.Send(audio, menu, telebot.ModeMarkdown)
+	}
 	return c.Send(msg, menu, telebot.ModeMarkdown)
 }
 
@@ -216,7 +220,12 @@ func (b *Bot) handleCallback(c telebot.Context) error {
 			menu.Inline(rows...)
 
 			msg := fmt.Sprintf("📝 **Topic:** %s\n\n**%s**", topic, qNext.Text)
-			b.teleBot.Send(c.Sender(), msg, menu, telebot.ModeMarkdown)
+			if qNext.AudioFileID != "" {
+				audio := &telebot.Voice{File: telebot.FromDisk(qNext.AudioFileID), Caption: msg}
+				b.teleBot.Send(c.Sender(), audio, menu, telebot.ModeMarkdown)
+			} else {
+				b.teleBot.Send(c.Sender(), msg, menu, telebot.ModeMarkdown)
+			}
 		}
 	}()
 

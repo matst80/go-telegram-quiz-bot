@@ -2,13 +2,16 @@ package quiz
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/mats/telegram-quiz-bot/internal/domain"
 	"github.com/mats/telegram-quiz-bot/internal/llm"
 	"github.com/mats/telegram-quiz-bot/internal/repository"
+	"github.com/mats/telegram-quiz-bot/internal/tts"
 	"github.com/robfig/cron/v3"
 )
 
@@ -17,16 +20,22 @@ type Scheduler struct {
 	repos   *repository.Repositories
 	llm     *llm.Client
 	plan    *PlanManager
+	tts     tts.Service
 	cronJob cron.EntryID
 	OnBatch func([]domain.Question)
+
+	mu          sync.Mutex
+	activeSeeds map[int64]bool
 }
 
-func NewScheduler(repos *repository.Repositories, llmClient *llm.Client, planManager *PlanManager) *Scheduler {
+func NewScheduler(repos *repository.Repositories, llmClient *llm.Client, planManager *PlanManager, ttsService tts.Service) *Scheduler {
 	return &Scheduler{
-		cron:  cron.New(),
-		repos: repos,
-		llm:   llmClient,
-		plan:  planManager,
+		cron:        cron.New(),
+		repos:       repos,
+		llm:         llmClient,
+		plan:        planManager,
+		tts:         ttsService,
+		activeSeeds: make(map[int64]bool),
 	}
 }
 
@@ -90,6 +99,22 @@ func (s *Scheduler) GenerateAndBroadcastBatch(count int) {
 			log.Printf("Error saving question: %v", err)
 			continue
 		}
+
+		// Generate TTS audio
+		if s.tts != nil && q.TTSPhrase != "" {
+			audioPath := fmt.Sprintf("storage/audio/q_%d.ogg", q.ID)
+			err = s.tts.GenerateSpeech(q.TTSPhrase, audioPath)
+			if err != nil {
+				log.Printf("[Scheduler] Error generating TTS for question %d: %v", q.ID, err)
+			} else {
+				q.AudioFileID = audioPath
+				// Update question with audio file ID
+				if updateErr := s.repos.Questions.Update(ctx, &q); updateErr != nil {
+					log.Printf("[Scheduler] Error updating question %d with audio file: %v", q.ID, updateErr)
+				}
+			}
+		}
+
 		savedQuestions = append(savedQuestions, q)
 		s.plan.RecordQuestionGenerated(ctx)
 	}
@@ -115,8 +140,22 @@ func (s *Scheduler) EnsurePoolSufficient(telegramID int64) {
 	}
 
 	if count < 2 {
+		s.mu.Lock()
+		if s.activeSeeds[telegramID] {
+			s.mu.Unlock()
+			return
+		}
+		s.activeSeeds[telegramID] = true
+		s.mu.Unlock()
+
 		log.Printf("[Scheduler] Pool low for user %d (quiz: %s, count: %d). Seeding to buffer of 2...", telegramID, currentQuiz.Title, count)
 		go func() {
+			defer func() {
+				s.mu.Lock()
+				delete(s.activeSeeds, telegramID)
+				s.mu.Unlock()
+			}()
+
 			for i := count; i < 2; i++ {
 				log.Printf("[Scheduler] Background generation %d/2 for user %d", i+1, telegramID)
 				s.GenerateAndSaveQuestion()

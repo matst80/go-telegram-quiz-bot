@@ -33,3 +33,8 @@ export interface PlanItem {
     questions: Question[];
   }[];
 }
+
+export interface SectionSuggestion {
+  title: string;
+  description: string;
+}

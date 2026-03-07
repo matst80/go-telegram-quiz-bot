@@ -3,13 +3,23 @@ package sqlite
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"testing"
 
 	"github.com/mats/telegram-quiz-bot/internal/domain"
 )
 
 func TestSeedDatabase(t *testing.T) {
-	store, err := NewStore("../../../quizbot.db")
+	// Create a temporary file for the database
+	tmpfile, err := os.CreateTemp("", "quizbot_test_*.db")
+	if err != nil {
+		t.Fatalf("Failed to create temp db file: %v", err)
+	}
+	dbPath := tmpfile.Name()
+	tmpfile.Close()
+	defer os.Remove(dbPath)
+
+	store, err := NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("Failed to open database: %v", err)
 	}

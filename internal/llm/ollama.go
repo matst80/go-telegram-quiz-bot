@@ -43,28 +43,32 @@ func NewClient(baseURL, model string) *Client {
 		baseURL = "http://localhost:11434"
 	}
 	if model == "" {
-		model = "qwen3.5:4b"
+		model = "qwen3.5:9b"
 	}
 	return &Client{
 		BaseURL: baseURL,
 		Model:   model,
 		HTTPClient: &http.Client{
-			Timeout: 90 * time.Second,
+			Timeout: 5 * time.Minute,
 		},
 	}
 }
 
 func (c *Client) GenerateSpanishQuestions(topic string, excludeQuestions []string, count int) ([]domain.Question, error) {
-	prompt := fmt.Sprintf(`You are an expert Spanish teacher. Generate %d basic Spanish quiz questions for beginners.
-Respond with a json block.
+	prompt := fmt.Sprintf(`You are an expert Spanish teacher. Generate exactly %d basic Spanish quiz questions for beginners.
+Respond ONLY with a valid JSON array. Do not include any explanations, greetings, or a thinking process. Do NOT output <think> blocks.
+Format your output exactly like this:
 [
   {
-    "text": "Question?",
-    "options": ["Option 1", "Option 2", "Option 3", "Option 4"],
-    "correct_answer": "Option 1"
+    "text": "What does the Spanish word 'Hola' mean?",
+    "options": ["Hello", "Goodbye", "Please", "Thank you"],
+    "correct_answer": "Hello",
+    "tts_phrase": "Hola"
   }
 ]
 Ensure each quiz question has exactly 4 options. All quiz questions MUST be about the given topic: "%s".
+The "text" field MUST be written in English so beginners can understand.
+The "tts_phrase" MUST be a short Spanish phrase or sentence featuring the Spanish word or concept being tested.
 Keep the vocabulary simple.`, count, topic)
 
 	if len(excludeQuestions) > 0 {
@@ -93,7 +97,45 @@ Keep the vocabulary simple.`, count, topic)
 	return nil, fmt.Errorf("failed to generate questions after 3 attempts: %w", lastErr)
 }
 
-func (c *Client) generateMulti(prompt string) ([]domain.Question, error) {
+// SectionSuggestion represents an AI-suggested learning section.
+type SectionSuggestion struct {
+	Title       string `json:"title"`
+	Description string `json:"description"`
+}
+
+// SuggestSections asks the LLM to suggest new learning segments based on existing topics.
+func (c *Client) SuggestSections(existingTopics []string) ([]SectionSuggestion, error) {
+	topicList := "none yet"
+	if len(existingTopics) > 0 {
+		topicList = strings.Join(existingTopics, ", ")
+	}
+
+	prompt := fmt.Sprintf(`You are a Spanish curriculum designer for beginners.
+The current learning plan already covers these topics: %s.
+Suggest 3 to 5 NEW topics that logically follow and build on what the student has already learned.
+Respond ONLY with a valid JSON array. Do not include any explanations, greetings, or thinking process. Do NOT output <think> blocks.
+Format your output exactly like this:
+[
+  {"title": "Topic Name", "description": "A brief description of what this topic covers and why it follows logically."}
+]
+Respond ONLY with the JSON array.`, topicList)
+
+	raw, err := c.generateRaw(prompt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate section suggestions: %w", err)
+	}
+
+	jsonContent := extractJSON(raw)
+	var suggestions []SectionSuggestion
+	if err := json.Unmarshal([]byte(jsonContent), &suggestions); err != nil {
+		return nil, fmt.Errorf("failed to parse suggestions JSON: %w", err)
+	}
+
+	return suggestions, nil
+}
+
+// generateRaw sends a prompt to Ollama and returns the raw concatenated text response.
+func (c *Client) generateRaw(prompt string) (string, error) {
 	reqBody := GenerateRequest{
 		Model:  c.Model,
 		Prompt: prompt,
@@ -102,24 +144,24 @@ func (c *Client) generateMulti(prompt string) ([]domain.Question, error) {
 
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	req, err := http.NewRequest("POST", c.BaseURL+"/api/generate", bytes.NewBuffer(jsonData))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request to ollama failed: %w", err)
+		return "", fmt.Errorf("request to ollama failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, string(bodyBytes))
+		return "", fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	var fullResponse strings.Builder
@@ -136,12 +178,21 @@ func (c *Client) generateMulti(prompt string) ([]domain.Question, error) {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error reading ollama stream: %w", err)
+		return "", fmt.Errorf("error reading ollama stream: %w", err)
 	}
 
-	rawContent := fullResponse.String()
-	log.Print(rawContent)
-	jsonContent := extractJSON(rawContent)
+	raw := fullResponse.String()
+	log.Print(raw)
+	return raw, nil
+}
+
+func (c *Client) generateMulti(prompt string) ([]domain.Question, error) {
+	raw, err := c.generateRaw(prompt)
+	if err != nil {
+		return nil, err
+	}
+
+	jsonContent := extractJSON(raw)
 
 	var questions []domain.Question
 	if err := json.Unmarshal([]byte(jsonContent), &questions); err != nil {
@@ -149,7 +200,7 @@ func (c *Client) generateMulti(prompt string) ([]domain.Question, error) {
 	}
 
 	for _, q := range questions {
-		if len(q.Options) != 4 || q.Text == "" || q.CorrectAnswer == "" {
+		if len(q.Options) != 4 || q.Text == "" || q.CorrectAnswer == "" || q.TTSPhrase == "" {
 			return nil, fmt.Errorf("invalid question format in array: %s", jsonContent)
 		}
 	}

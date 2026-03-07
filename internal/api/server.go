@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/mats/telegram-quiz-bot/internal/llm"
 	"github.com/mats/telegram-quiz-bot/internal/repository"
 )
 
@@ -16,10 +17,11 @@ import (
 type Server struct {
 	server *http.Server
 	repos  *repository.Repositories
+	llm    *llm.Client
 }
 
 // NewServer initializes a new HTTP server.
-func NewServer(port string, repos *repository.Repositories) *Server {
+func NewServer(port string, repos *repository.Repositories, llmClient *llm.Client) *Server {
 	if port == "" {
 		port = "8080"
 	}
@@ -32,6 +34,7 @@ func NewServer(port string, repos *repository.Repositories) *Server {
 			Handler: mux,
 		},
 		repos: repos,
+		llm:   llmClient,
 	}
 
 	s.registerRoutes(mux)
@@ -85,6 +88,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/plan", s.handleGetPlan)
 
 	// Segments
+	mux.HandleFunc("POST /api/segments/suggest", s.handleSuggestSegments)
 	mux.HandleFunc("GET /api/segments", s.handleGetSegments)
 	mux.HandleFunc("POST /api/segments", s.handleCreateSegment)
 	mux.HandleFunc("GET /api/segments/{id}", s.handleGetSegment)

@@ -13,6 +13,7 @@ import (
 	"github.com/mats/telegram-quiz-bot/internal/llm"
 	"github.com/mats/telegram-quiz-bot/internal/quiz"
 	"github.com/mats/telegram-quiz-bot/internal/repository/sqlite"
+	"github.com/mats/telegram-quiz-bot/internal/tts"
 )
 
 func main() {
@@ -51,12 +52,28 @@ func main() {
 	llmClient := llm.NewClient(ollamaURL, modelName)
 	log.Printf("LLM Client initialized (Model: %s at %s)", modelName, ollamaURL)
 
+	// Initialize TTS Service
+	modelDir := "storage/tts_model"
+	piperConfig, err := tts.EnsureDefaultModel(modelDir)
+	if err != nil {
+		log.Fatalf("Failed to initialize TTS model: %v", err)
+	}
+	ttsService, err := tts.NewPiperService(piperConfig)
+	if err != nil {
+		log.Fatalf("Failed to create TTS service: %v", err)
+	}
+
+	// Make sure the audio storage directory exists
+	if err := os.MkdirAll("storage/audio", 0755); err != nil {
+		log.Fatalf("Failed to create audio storage directory: %v", err)
+	}
+
 	// 4. Initialize Scheduler and Plan
 	planManager := quiz.NewPlanManager(repos)
-	scheduler := quiz.NewScheduler(repos, llmClient, planManager)
+	scheduler := quiz.NewScheduler(repos, llmClient, planManager, ttsService)
 
 	// Schedule a quiz generation every 5 minutes during daytime (8 AM - 8 PM)
-	err = scheduler.Start("*/5 8-20 * * *")
+	err = scheduler.Start("0 0 * * *")
 	if err != nil {
 		log.Fatalf("Failed to start scheduler: %v", err)
 	}
@@ -67,7 +84,7 @@ func main() {
 	if httpPort == "" {
 		httpPort = "8080"
 	}
-	apiServer := api.NewServer(httpPort, repos)
+	apiServer := api.NewServer(httpPort, repos, llmClient)
 	go func() {
 		if err := apiServer.Start(); err != nil {
 			log.Fatalf("API Server failed: %v", err)

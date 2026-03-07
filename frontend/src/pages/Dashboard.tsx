@@ -1,10 +1,11 @@
 import { Link } from "react-router-dom"
 import { useQuery } from "@tanstack/react-query"
-import { Plus, ChevronRight, Layers, Trash2, Edit2 } from "lucide-react"
+import { Plus, ChevronRight, Layers, Trash2, Edit2, Sparkles, Loader2, Check } from "lucide-react"
 import { Button } from "../components/ui/button"
 import { Card, CardHeader, CardTitle, CardContent } from "../components/ui/card"
-import { getPlan, createSegment, deleteSegment } from "../api"
+import { getPlan, createSegment, deleteSegment, suggestSections } from "../api"
 import { useState } from "react"
+import type { SectionSuggestion } from "../lib/types"
 
 export function Dashboard() {
   const { data: plan, isLoading, error, refetch } = useQuery({ queryKey: ["plan"], queryFn: getPlan })
@@ -12,6 +13,12 @@ export function Dashboard() {
   const [newTitle, setNewTitle] = useState("")
   const [newDesc, setNewDesc] = useState("")
   const [newOrder, setNewOrder] = useState(0)
+
+  // AI suggestions state
+  const [suggestions, setSuggestions] = useState<SectionSuggestion[]>([])
+  const [isSuggesting, setIsSuggesting] = useState(false)
+  const [suggestError, setSuggestError] = useState("")
+  const [acceptedTitles, setAcceptedTitles] = useState<Set<string>>(new Set())
 
   const handleAddSegment = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -38,6 +45,33 @@ export function Dashboard() {
     }
   }
 
+  const handleSuggest = async () => {
+    setIsSuggesting(true)
+    setSuggestError("")
+    setSuggestions([])
+    setAcceptedTitles(new Set())
+    try {
+      const data = await suggestSections()
+      setSuggestions(data)
+    } catch (err) {
+      setSuggestError("Failed to get AI suggestions. Is the LLM running?")
+      console.error(err)
+    } finally {
+      setIsSuggesting(false)
+    }
+  }
+
+  const handleAcceptSuggestion = async (suggestion: SectionSuggestion) => {
+    const nextOrder = (plan?.length || 0) + acceptedTitles.size + 1
+    try {
+      await createSegment({ title: suggestion.title, description: suggestion.description, order_index: nextOrder })
+      setAcceptedTitles((prev) => new Set(prev).add(suggestion.title))
+      refetch()
+    } catch (err) {
+      console.error("Failed to create segment from suggestion", err)
+    }
+  }
+
   if (isLoading) return <div className="flex items-center justify-center h-64 text-slate-500">Loading plan...</div>
   if (error) return <div className="text-red-500 bg-red-50 p-4 rounded-md border border-red-200">Failed to load learning plan</div>
 
@@ -48,10 +82,75 @@ export function Dashboard() {
           <h1 className="text-3xl font-bold tracking-tight text-slate-900">Learning Plan</h1>
           <p className="text-slate-500 mt-1">Manage the overall curriculum segments.</p>
         </div>
-        <Button onClick={() => setIsAdding(!isAdding)} className="gap-2">
-          {isAdding ? "Cancel" : <><Plus className="h-4 w-4" /> Add Segment</>}
-        </Button>
+        <div className="flex gap-2">
+          <Button
+            onClick={handleSuggest}
+            disabled={isSuggesting}
+            variant="outline"
+            className="gap-2 border-purple-200 text-purple-700 hover:bg-purple-50 hover:border-purple-300"
+          >
+            {isSuggesting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+            {isSuggesting ? "Thinking..." : "AI Suggest"}
+          </Button>
+          <Button onClick={() => setIsAdding(!isAdding)} className="gap-2">
+            {isAdding ? "Cancel" : <><Plus className="h-4 w-4" /> Add Segment</>}
+          </Button>
+        </div>
       </div>
+
+      {suggestError && (
+        <div className="text-red-600 bg-red-50 border border-red-200 p-4 rounded-lg text-sm">{suggestError}</div>
+      )}
+
+      {suggestions.length > 0 && (
+        <Card className="border-purple-200 shadow-md bg-gradient-to-br from-purple-50/50 to-white">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-lg text-purple-900 flex items-center gap-2">
+              <Sparkles className="h-5 w-5 text-purple-500" />
+              AI Suggestions
+            </CardTitle>
+            <p className="text-sm text-slate-500 mt-1">Click Accept to add a suggestion as a new segment.</p>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {suggestions.map((s) => {
+              const isAccepted = acceptedTitles.has(s.title)
+              return (
+                <div
+                  key={s.title}
+                  className={`flex items-center justify-between p-4 rounded-lg border transition-all ${
+                    isAccepted
+                      ? "bg-green-50 border-green-200"
+                      : "bg-white border-slate-200 hover:border-purple-300 hover:shadow-sm"
+                  }`}
+                >
+                  <div className="flex-1 min-w-0 mr-4">
+                    <h4 className="font-semibold text-slate-900">{s.title}</h4>
+                    <p className="text-sm text-slate-500 mt-0.5 line-clamp-2">{s.description}</p>
+                  </div>
+                  {isAccepted ? (
+                    <span className="flex items-center gap-1.5 text-green-700 text-sm font-medium whitespace-nowrap">
+                      <Check className="h-4 w-4" /> Added
+                    </span>
+                  ) : (
+                    <Button
+                      size="sm"
+                      onClick={() => handleAcceptSuggestion(s)}
+                      className="whitespace-nowrap bg-purple-600 hover:bg-purple-700"
+                    >
+                      Accept
+                    </Button>
+                  )}
+                </div>
+              )
+            })}
+            <div className="flex justify-end pt-2">
+              <Button variant="ghost" size="sm" onClick={() => setSuggestions([])} className="text-slate-500">
+                Dismiss
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {isAdding && (
         <Card className="border-blue-100 shadow-md">
@@ -108,15 +207,15 @@ export function Dashboard() {
             <CardContent className="p-0 flex items-stretch">
               <div className="bg-slate-50 w-16 flex items-center justify-center border-r border-slate-100 rounded-l-lg">
                 <div className="h-8 w-8 rounded-full bg-blue-100 text-blue-700 font-bold flex items-center justify-center">
-                  {item.segment.order_index}
+                  {item.segment?.order_index}
                 </div>
               </div>
               <div className="p-6 flex-1 flex items-center justify-between">
                 <div>
                   <h3 className="text-xl font-semibold text-slate-900 group-hover:text-blue-600 transition-colors">
-                    {item.segment.title}
+                    {item.segment?.title}
                   </h3>
-                  <p className="text-slate-500 text-sm mt-1 line-clamp-2 max-w-2xl">{item.segment.description}</p>
+                  <p className="text-slate-500 text-sm mt-1 line-clamp-2 max-w-2xl">{item.segment?.description}</p>
 
                   <div className="flex items-center gap-4 mt-4 text-xs font-medium text-slate-400">
                     <span className="flex items-center gap-1.5 bg-slate-100 px-2 py-1 rounded-md text-slate-600">
@@ -130,11 +229,11 @@ export function Dashboard() {
                     <Button variant="outline" size="icon" className="h-8 w-8 text-slate-400 hover:text-blue-600">
                       <Edit2 className="h-4 w-4" />
                     </Button>
-                    <Button variant="outline" size="icon" onClick={() => handleDelete(item.segment.id)} className="h-8 w-8 text-slate-400 hover:text-red-600 hover:bg-red-50 hover:border-red-200">
+                    <Button variant="outline" size="icon" onClick={() => handleDelete(item.segment?.id)} className="h-8 w-8 text-slate-400 hover:text-red-600 hover:bg-red-50 hover:border-red-200">
                       <Trash2 className="h-4 w-4" />
                     </Button>
                   </div>
-                  <Link to={`/segments/${item.segment.id}`}>
+                  <Link to={`/segments/${item.segment?.id}`}>
                     <Button variant="ghost" className="gap-1 text-blue-600 hover:bg-blue-50">
                       Manage <ChevronRight className="h-4 w-4" />
                     </Button>
