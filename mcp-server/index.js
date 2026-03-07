@@ -1,11 +1,14 @@
 require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
 const { McpServer } = require("@modelcontextprotocol/sdk/server/mcp.js");
-const { StdioServerTransport } = require("@modelcontextprotocol/sdk/server/stdio.js");
+const { SSEServerTransport } = require("@modelcontextprotocol/sdk/server/sse.js");
 const { z } = require("zod");
 const axios = require("axios");
 
 // Go API backend URL
 const API_BASE_URL = process.env.API_BASE_URL || "http://localhost:8080/api";
+const PORT = process.env.PORT || 3001;
 
 const server = new McpServer({
     name: "telegram-quiz-bot-mcp",
@@ -115,10 +118,15 @@ server.tool(
         quiz_id: z.number().describe("The ID of the quiz to add this question to"),
         text: z.string().describe("The question text"),
         options: z.array(z.string()).describe("A list of options for the multiple-choice question"),
-        correct_index: z.number().describe("The index (0-based) of the correct option"),
-        explanation: z.string().describe("An explanation for the correct answer")
+        correct_answer: z.string().describe("The correct answer string exactly matching one of the options"),
+        tts_phrase: z.string().optional().describe("A short TTS phrase or sentence featuring the tested word"),
+        is_active: z.boolean().optional().describe("Whether the question is active (defaults to true if omitted)")
     },
     async ({ quiz_id, ...data }) => {
+        // default to active if not provided
+        if (data.is_active === undefined) {
+            data.is_active = true;
+        }
         return await makeApiRequest("POST", `/quizzes/${quiz_id}/questions`, data);
     }
 );
@@ -132,25 +140,77 @@ server.tool(
         quiz_id: z.number().optional().describe("The ID of the quiz this question belongs to"),
         text: z.string().describe("The question text"),
         options: z.array(z.string()).describe("A list of options for the multiple-choice question"),
-        correct_index: z.number().describe("The index (0-based) of the correct option"),
-        explanation: z.string().describe("An explanation for the correct answer")
+        correct_answer: z.string().describe("The correct answer string exactly matching one of the options"),
+        tts_phrase: z.string().optional().describe("A short TTS phrase or sentence featuring the tested word"),
+        is_active: z.boolean().optional().describe("Whether the question is active")
     },
     async ({ id, ...data }) => {
         return await makeApiRequest("PUT", `/questions/${id}`, data);
     }
 );
 
+// delete_segment
+server.tool(
+    "delete_segment",
+    "Deletes an existing learning segment.",
+    {
+        id: z.number().describe("The ID of the segment to delete")
+    },
+    async ({ id }) => {
+        return await makeApiRequest("DELETE", `/segments/${id}`);
+    }
+);
+
+// delete_quiz
+server.tool(
+    "delete_quiz",
+    "Deletes an existing quiz topic.",
+    {
+        id: z.number().describe("The ID of the quiz to delete")
+    },
+    async ({ id }) => {
+        return await makeApiRequest("DELETE", `/quizzes/${id}`);
+    }
+);
+
+// delete_question
+server.tool(
+    "delete_question",
+    "Deletes an existing multiple-choice question.",
+    {
+        id: z.number().describe("The ID of the question to delete")
+    },
+    async ({ id }) => {
+        return await makeApiRequest("DELETE", `/questions/${id}`);
+    }
+);
 
 // ==========================================
 // Server Startup
 // ==========================================
 
-async function startServer() {
-    const transport = new StdioServerTransport();
+const app = express();
+app.use(cors());
+// Do NOT use body-parser or express.json globally here if SSEServerTransport handles the raw body itself or expects express.json() but we'll see
+
+let transport;
+
+app.get('/sse', async (req, res) => {
+    transport = new SSEServerTransport('/messages', res);
     await server.connect(transport);
-    console.error("MCP Server running on stdio");
-}
+});
 
-startServer().catch(console.error);
+app.post('/messages', express.json(), async (req, res) => {
+    if (!transport) {
+        return res.status(503).send('Transport not connected');
+    }
+    await transport.handlePostMessage(req, res);
+});
 
-module.exports = { server, makeApiRequest };
+app.listen(PORT, () => {
+    console.log(`MCP Server running on SSE at http://localhost:${PORT}`);
+    console.log(`SSE endpoint: http://localhost:${PORT}/sse`);
+    console.log(`Message endpoint: http://localhost:${PORT}/messages`);
+});
+
+module.exports = { server, makeApiRequest, app };
