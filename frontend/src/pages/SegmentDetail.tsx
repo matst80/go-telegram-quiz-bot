@@ -1,10 +1,11 @@
 import { useParams, Link } from "react-router-dom"
 import { useQuery } from "@tanstack/react-query"
-import { Plus, ChevronRight, Trash2, ArrowLeft, CheckCircle2 } from "lucide-react"
+import { Plus, ChevronRight, Trash2, ArrowLeft, CheckCircle2, Sparkles, Loader2, Check } from "lucide-react"
 import { Button } from "../components/ui/button"
 import { Card, CardHeader, CardTitle, CardContent } from "../components/ui/card"
-import { getSegment, getSegmentQuizzes, createQuiz, deleteQuiz } from "../api"
+import { getSegment, getSegmentQuizzes, createQuiz, deleteQuiz, suggestQuizzes } from "../api"
 import { useState } from "react"
+import type { SectionSuggestion } from "../lib/types"
 
 export function SegmentDetail() {
   const { id } = useParams()
@@ -17,6 +18,13 @@ export function SegmentDetail() {
   const [newTitle, setNewTitle] = useState("")
   const [newDesc, setNewDesc] = useState("")
   const [newOrder, setNewOrder] = useState(0)
+
+  // AI suggestions state
+  const [suggestions, setSuggestions] = useState<SectionSuggestion[]>([])
+  const [customPrompt, setCustomPrompt] = useState("")
+  const [isSuggesting, setIsSuggesting] = useState(false)
+  const [suggestError, setSuggestError] = useState("")
+  const [acceptedTitles, setAcceptedTitles] = useState<Set<string>>(new Set())
 
   const handleAddQuiz = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -43,6 +51,33 @@ export function SegmentDetail() {
     }
   }
 
+  const handleSuggest = async () => {
+    setIsSuggesting(true)
+    setSuggestError("")
+    setSuggestions([])
+    setAcceptedTitles(new Set())
+    try {
+      const data = await suggestQuizzes(segmentId, customPrompt)
+      setSuggestions(data)
+    } catch (err) {
+      setSuggestError("Failed to get AI quiz suggestions. Is the LLM running?")
+      console.error(err)
+    } finally {
+      setIsSuggesting(false)
+    }
+  }
+
+  const handleAcceptSuggestion = async (suggestion: SectionSuggestion) => {
+    const nextOrder = (quizzes?.length || 0) + acceptedTitles.size + 1
+    try {
+      await createQuiz(segmentId, { title: suggestion.title, description: suggestion.description, order_index: nextOrder, segment_id: segmentId })
+      setAcceptedTitles((prev) => new Set(prev).add(suggestion.title))
+      refetch()
+    } catch (err) {
+      console.error("Failed to create quiz from suggestion", err)
+    }
+  }
+
   if (isLoadingSegment || isLoadingQuizzes) return <div className="flex items-center justify-center h-64 text-slate-500">Loading segment details...</div>
 
   return (
@@ -60,10 +95,85 @@ export function SegmentDetail() {
           <h1 className="text-3xl font-bold tracking-tight text-slate-900">{segment?.title}</h1>
           <p className="text-slate-500 mt-1 max-w-3xl">{segment?.description}</p>
         </div>
-        <Button onClick={() => setIsAdding(!isAdding)} className="gap-2">
-          {isAdding ? "Cancel" : <><Plus className="h-4 w-4" /> Add Quiz</>}
-        </Button>
+        <div className="flex gap-2">
+          <div className="flex bg-slate-100 p-1 rounded-md border border-slate-200">
+            <input
+              type="text"
+              value={customPrompt}
+              onChange={(e) => setCustomPrompt(e.target.value)}
+              placeholder="e.g. Focus on verbs..."
+              className="bg-transparent border-none focus:ring-0 text-sm px-2 w-48"
+            />
+            <Button
+              onClick={handleSuggest}
+              disabled={isSuggesting}
+              variant="ghost"
+              size="sm"
+              className="gap-2 text-purple-700 hover:bg-purple-100"
+            >
+              {isSuggesting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+              {isSuggesting ? "Thinking..." : "AI Suggest"}
+            </Button>
+          </div>
+          <Button onClick={() => setIsAdding(!isAdding)} className="gap-2">
+            {isAdding ? "Cancel" : <><Plus className="h-4 w-4" /> Add Quiz</>}
+          </Button>
+        </div>
       </div>
+
+      {suggestError && (
+        <div className="text-red-600 bg-red-50 border border-red-200 p-4 rounded-lg text-sm">{suggestError}</div>
+      )}
+
+      {suggestions.length > 0 && (
+        <Card className="border-purple-200 shadow-md bg-gradient-to-br from-purple-50/50 to-white">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-lg text-purple-900 flex items-center gap-2">
+              <Sparkles className="h-5 w-5 text-purple-500" />
+              AI Quiz Suggestions
+            </CardTitle>
+            <p className="text-sm text-slate-500 mt-1">Click Accept to add a suggestion as a new quiz topic.</p>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {suggestions.map((s) => {
+              const isAccepted = acceptedTitles.has(s.title)
+              return (
+                <div
+                  key={s.title}
+                  className={`flex items-center justify-between p-4 rounded-lg border transition-all ${
+                    isAccepted
+                      ? "bg-green-50 border-green-200"
+                      : "bg-white border-slate-200 hover:border-purple-300 hover:shadow-sm"
+                  }`}
+                >
+                  <div className="flex-1 min-w-0 mr-4">
+                    <h4 className="font-semibold text-slate-900">{s.title}</h4>
+                    <p className="text-sm text-slate-500 mt-0.5 line-clamp-2">{s.description}</p>
+                  </div>
+                  {isAccepted ? (
+                    <span className="flex items-center gap-1.5 text-green-700 text-sm font-medium whitespace-nowrap">
+                      <Check className="h-4 w-4" /> Added
+                    </span>
+                  ) : (
+                    <Button
+                      size="sm"
+                      onClick={() => handleAcceptSuggestion(s)}
+                      className="whitespace-nowrap bg-purple-600 hover:bg-purple-700"
+                    >
+                      Accept
+                    </Button>
+                  )}
+                </div>
+              )
+            })}
+            <div className="flex justify-end pt-2">
+              <Button variant="ghost" size="sm" onClick={() => setSuggestions([])} className="text-slate-500">
+                Dismiss
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {isAdding && (
         <Card className="border-blue-100 shadow-md">

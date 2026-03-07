@@ -39,6 +39,49 @@ func (s *Server) handleSuggestSegments(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, suggestions)
 }
 
+func (s *Server) handleSuggestQuizzes(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid segment ID")
+		return
+	}
+
+	ctx := r.Context()
+
+	// Optional request body for custom context/prompts
+	var req struct {
+		Prompt string `json:"prompt"`
+	}
+	if r.ContentLength > 0 {
+		json.NewDecoder(r.Body).Decode(&req)
+	}
+
+	segment, err := s.repos.Segments.GetByID(ctx, id)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "Segment not found")
+		return
+	}
+
+	quizzes, err := s.repos.Quizzes.GetBySegmentID(ctx, id)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to fetch quizzes")
+		return
+	}
+
+	var existingTitles []string
+	for _, q := range quizzes {
+		existingTitles = append(existingTitles, q.Title)
+	}
+
+	suggestions, err := s.llm.SuggestQuizzesWithPrompt(segment.Title, existingTitles, req.Prompt)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to generate quiz suggestions: "+err.Error())
+		return
+	}
+
+	respondJSON(w, http.StatusOK, suggestions)
+}
+
 func (s *Server) handleGetPlan(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	segments, err := s.repos.Segments.GetAll(ctx)

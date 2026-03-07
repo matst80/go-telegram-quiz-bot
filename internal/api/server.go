@@ -98,6 +98,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Quizzes (nested under segments for creation/listing)
 	mux.HandleFunc("GET /api/segments/{id}/quizzes", s.handleGetSegmentQuizzes)
 	mux.HandleFunc("POST /api/segments/{id}/quizzes", s.handleCreateSegmentQuiz)
+	mux.HandleFunc("POST /api/segments/{id}/quizzes/suggest", s.handleSuggestQuizzes)
 
 	// Quizzes (direct access for update/delete/get)
 	mux.HandleFunc("GET /api/quizzes/{id}", s.handleGetQuiz)

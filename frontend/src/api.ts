@@ -93,3 +93,12 @@ export async function suggestSections(prompt?: string) {
   if (!res.ok) throw new Error("Failed to get AI suggestions")
   return res.json()
 }
+export async function suggestQuizzes(segmentId: number, prompt?: string) {
+  const res = await fetch(`${API_URL}/segments/${segmentId}/quizzes/suggest`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt }),
+  })
+  if (!res.ok) throw new Error("Failed to get AI quiz suggestions")
+  return res.json()
+}

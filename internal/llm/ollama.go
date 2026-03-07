@@ -148,9 +148,36 @@ var segmentTool = Tool{
 	},
 }
 
-const suggestSystemPrompt = `You are a Spanish curriculum designer for beginners.
+// quizTool defines the add_quiz tool schema for the model.
+var quizTool = Tool{
+	Type: "function",
+	Function: ToolFunction{
+		Name:        "add_quiz",
+		Description: "Suggest a new Spanish quiz topic within a segment. Call this once per quiz.",
+		Parameters: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"title": {
+					"type": "string",
+					"description": "Short, descriptive title of the quiz topic (e.g. 'Greeting People')"
+				},
+				"description": {
+					"type": "string",
+					"description": "Brief explanation of what the quiz covers"
+				}
+			},
+			"required": ["title", "description"]
+		}`),
+	},
+}
+
+const suggestSegmentSystemPrompt = `You are a Spanish curriculum designer for beginners.
 Suggest new learning segments that logically follow the existing plan.
 For each segment, call the add_segment tool.`
+
+const suggestQuizSystemPrompt = `You are a Spanish curriculum designer for beginners.
+Suggest new quiz topics within a specific learning segment.
+For each quiz topic, call the add_quiz tool.`
 
 const questionSystemPrompt = `You are an expert Spanish teacher creating quiz questions for beginners.
 For each question, call the add_question tool. Generate all requested questions by calling the tool multiple times.
@@ -234,7 +261,7 @@ func (c *Client) SuggestSectionsWithPrompt(existingTopics []string, customPrompt
 		log.Printf("[LLM] Attempt %d", attempt)
 
 		var suggestions []SectionSuggestion
-		err := c.generateStreamingTools(suggestSystemPrompt, userPrompt, []Tool{segmentTool}, func(tc ToolCall) error {
+		err := c.generateStreamingTools(suggestSegmentSystemPrompt, userPrompt, []Tool{segmentTool}, func(tc ToolCall) error {
 			if tc.Function.Name != "add_segment" {
 				return nil
 			}
@@ -265,6 +292,61 @@ func (c *Client) SuggestSectionsWithPrompt(existingTopics []string, customPrompt
 	}
 
 	return nil, fmt.Errorf("failed to suggest sections after 3 attempts: %w", lastErr)
+}
+
+// SuggestQuizzesWithPrompt asks the LLM to suggest new quiz topics for a specific segment.
+func (c *Client) SuggestQuizzesWithPrompt(segmentTitle string, existingQuizzes []string, customPrompt string) ([]SectionSuggestion, error) {
+	quizList := "none yet"
+	if len(existingQuizzes) > 0 {
+		quizList = strings.Join(existingQuizzes, ", ")
+	}
+
+	userPrompt := fmt.Sprintf("The segment is \"%s\". Existing quiz topics are: %s.", segmentTitle, quizList)
+	if customPrompt != "" {
+		userPrompt += "\nSpecial Instructions: " + customPrompt
+	} else {
+		userPrompt += "\nSuggest 3 to 5 NEW quiz topics for this segment."
+	}
+	userPrompt += "\nCall add_quiz for each suggestion."
+
+	log.Printf("[LLM] Suggesting quizzes for segment %q based on: %s (custom prompt: %q)", segmentTitle, quizList, customPrompt)
+
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		log.Printf("[LLM] Attempt %d", attempt)
+
+		var suggestions []SectionSuggestion
+		err := c.generateStreamingTools(suggestQuizSystemPrompt, userPrompt, []Tool{quizTool}, func(tc ToolCall) error {
+			if tc.Function.Name != "add_quiz" {
+				return nil
+			}
+			title, _ := tc.Function.Arguments["title"].(string)
+			desc, _ := tc.Function.Arguments["description"].(string)
+			if title != "" {
+				suggestions = append(suggestions, SectionSuggestion{Title: title, Description: desc})
+			}
+			return nil
+		})
+
+		if err != nil {
+			lastErr = err
+			log.Printf("[LLM] Attempt %d failed: %v", attempt, err)
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+
+		if len(suggestions) == 0 {
+			lastErr = fmt.Errorf("model returned 0 tool calls")
+			log.Printf("[LLM] Attempt %d: no suggestions returned", attempt)
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+
+		log.Printf("[LLM] Generated %d quiz suggestions on attempt %d", len(suggestions), attempt)
+		return suggestions, nil
+	}
+
+	return nil, fmt.Errorf("failed to suggest quizzes after 3 attempts: %w", lastErr)
 }
 
 // SuggestSections is a convenience wrapper for backward compatibility.
